@@ -3,8 +3,8 @@ mod preview;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use lanrec_core::capture;
 use lanrec_core::config::{self, Labels};
 use lanrec_core::d3d::Gpu;

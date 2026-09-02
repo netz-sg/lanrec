@@ -20,7 +20,7 @@
 
 use std::io::{Read, Write};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// "LANR". Lets the receiver reject anything that is not us before it tries to
@@ -184,9 +184,8 @@ pub fn write_end(out: &mut impl Write) -> Result<()> {
 /// Returns `None` at a clean end of stream.
 pub fn read_frame(input: &mut impl Read, buf: &mut Vec<u8>) -> Result<Option<Header>> {
     let mut raw = [0u8; HEADER_LEN];
-    match read_exact_or_eof(input, &mut raw)? {
-        false => return Ok(None),
-        true => {}
+    if !read_exact_or_eof(input, &mut raw)? {
+        return Ok(None);
     }
 
     let header = Header::decode(&raw)?;
@@ -206,7 +205,10 @@ fn read_exact_or_eof(input: &mut impl Read, buf: &mut [u8]) -> Result<bool> {
     while filled < buf.len() {
         match input.read(&mut buf[filled..]) {
             Ok(0) if filled == 0 => return Ok(false),
-            Ok(0) => bail!("Verbindung mitten im Header abgebrochen ({filled} von {} Bytes)", buf.len()),
+            Ok(0) => bail!(
+                "Verbindung mitten im Header abgebrochen ({filled} von {} Bytes)",
+                buf.len()
+            ),
             Ok(n) => filled += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e).context("Header lesen"),
@@ -252,7 +254,12 @@ mod tests {
     fn foreign_data_is_rejected() {
         let mut b = [0u8; HEADER_LEN];
         b[0..4].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
-        assert!(Header::decode(&b).unwrap_err().to_string().contains("Magic"));
+        assert!(
+            Header::decode(&b)
+                .unwrap_err()
+                .to_string()
+                .contains("Magic")
+        );
     }
 
     #[test]
@@ -299,7 +306,14 @@ mod tests {
             sender: "test".into(),
         };
         write_info(&mut wire, &info).unwrap();
-        write_frame(&mut wire, Kind::Video, 16_666_667, FLAG_KEYFRAME, &[1, 2, 3]).unwrap();
+        write_frame(
+            &mut wire,
+            Kind::Video,
+            16_666_667,
+            FLAG_KEYFRAME,
+            &[1, 2, 3],
+        )
+        .unwrap();
         write_frame(&mut wire, Kind::Video, 33_333_334, 0, &[4, 5]).unwrap();
         write_end(&mut wire).unwrap();
 
@@ -321,7 +335,10 @@ mod tests {
         assert!(!h.is_keyframe());
         assert_eq!(buf, [4, 5]);
 
-        assert_eq!(read_frame(&mut r, &mut buf).unwrap().unwrap().kind, Kind::End);
+        assert_eq!(
+            read_frame(&mut r, &mut buf).unwrap().unwrap().kind,
+            Kind::End
+        );
         assert!(read_frame(&mut r, &mut buf).unwrap().is_none());
     }
 

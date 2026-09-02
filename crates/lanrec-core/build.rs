@@ -129,7 +129,11 @@ fn generate_struct_versions(out: &Path) {
     for cap in re.captures_iter(&src) {
         let name = &cap[1];
         let ver = &cap[2];
-        let high_bit = if cap.get(3).is_some() { " | (1 << 31)" } else { "" };
+        let high_bit = if cap.get(3).is_some() {
+            " | (1 << 31)"
+        } else {
+            ""
+        };
         rs.push_str(&format!(
             "pub const {name}: u32 = nvenc_struct_version({ver}){high_bit};\n"
         ));

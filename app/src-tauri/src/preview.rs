@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use lanrec_core::capture::{self, Capture};
 use lanrec_core::d3d::Gpu;
 use lanrec_core::preview::Downscaler;

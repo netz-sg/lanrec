@@ -8,16 +8,16 @@
 pub mod encoder;
 pub mod sys;
 
-use std::ffi::{c_void, CStr};
+use std::ffi::{CStr, c_void};
 use std::ptr;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use windows::core::{s, Interface};
 use windows::Win32::Foundation::{FreeLibrary, HMODULE};
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+use windows::core::{Interface, s};
 
 /// Which codecs we care about, keyed off the GUIDs the driver reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,10 +79,19 @@ pub struct Nvenc {
     api: sys::NV_ENCODE_API_FUNCTION_LIST,
 }
 
+// SAFETY: `Nvenc` is a module handle plus a table of function pointers the driver
+// filled in. Both are plain data that stay valid for the life of the process and
+// mean the same thing on every thread, and nothing here has interior mutability.
+// Making this Send + Sync is what lets an encoder move to a worker thread; the
+// per-session thread rules live on `Session`, not here.
+unsafe impl Send for Nvenc {}
+unsafe impl Sync for Nvenc {}
+
 impl Nvenc {
     pub fn load() -> Result<Self> {
-        let lib = unsafe { LoadLibraryA(s!("nvEncodeAPI64.dll")) }
-            .context("nvEncodeAPI64.dll konnte nicht geladen werden -- NVIDIA-Treiber installiert?")?;
+        let lib = unsafe { LoadLibraryA(s!("nvEncodeAPI64.dll")) }.context(
+            "nvEncodeAPI64.dll konnte nicht geladen werden -- NVIDIA-Treiber installiert?",
+        )?;
 
         // The driver refuses any call from a client built against a newer API than
         // it implements, so check up front and say which side is behind rather than
@@ -117,9 +126,8 @@ impl Nvenc {
         unsafe {
             let f = GetProcAddress(lib, s!("NvEncodeAPICreateInstance"))
                 .context("NvEncodeAPICreateInstance fehlt in nvEncodeAPI64.dll")?;
-            let f: unsafe extern "C" fn(
-                *mut sys::NV_ENCODE_API_FUNCTION_LIST,
-            ) -> sys::NVENCSTATUS = std::mem::transmute(f);
+            let f: unsafe extern "C" fn(*mut sys::NV_ENCODE_API_FUNCTION_LIST) -> sys::NVENCSTATUS =
+                std::mem::transmute(f);
             check_status(f(&mut api), None, "NvEncodeAPICreateInstance")?;
         }
 
@@ -171,6 +179,14 @@ pub struct Session {
     nvenc: Arc<Nvenc>,
     enc: *mut c_void,
 }
+
+// SAFETY: the encoder handle is an opaque driver pointer with no thread affinity,
+// so a session can be created on one thread and used on another.
+//
+// Deliberately *not* Sync: NVENC requires that a single session is not driven
+// from two threads at once, and there is no lock here to enforce that. One owner
+// at a time is exactly what `Send` without `Sync` expresses.
+unsafe impl Send for Session {}
 
 impl Session {
     /// The API function table. Every pointer in it is filled by the driver.
@@ -253,7 +269,9 @@ impl Session {
     /// NVENC engine count is a per-GPU property, but the API only exposes it
     /// through a codec query, so it needs some codec to ask about.
     pub fn encoder_engines(&self, codec: Codec) -> Result<u32> {
-        Ok(self.cap(codec, sys::NV_ENC_CAPS_NUM_ENCODER_ENGINES)?.max(1) as u32)
+        Ok(self
+            .cap(codec, sys::NV_ENC_CAPS_NUM_ENCODER_ENGINES)?
+            .max(1) as u32)
     }
 
     fn check(&self, status: sys::NVENCSTATUS, what: &str) -> Result<()> {

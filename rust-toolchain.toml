@@ -1,3 +1,5 @@
 [toolchain]
 channel = "stable"
-targets = ["x86_64-pc-windows-msvc"]
+# No `targets` pin on purpose: the receiver is built for macOS and Linux too, and
+# pinning a Windows target here would make every non-Windows build install a
+# cross-std it never uses.

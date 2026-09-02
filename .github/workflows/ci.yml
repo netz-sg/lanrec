@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Build and test (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable
+      - shell: bash
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $GITHUB_ENV
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --exclude lanrec-app
+      - run: cargo test --workspace --exclude lanrec-app
+      - run: cargo clippy --workspace --exclude lanrec-app -- -D warnings
+      - run: cargo fmt --all -- --check
+
+  receiver:
+    name: Receiver builds without Windows (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update stable && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      # The whole point of splitting lanrec-wire out: this must keep working.
+      - run: cargo build --release -p lanrec-recv
+      - run: cargo test --release -p lanrec-wire

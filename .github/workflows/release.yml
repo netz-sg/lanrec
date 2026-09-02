@@ -1,0 +1,166 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # So a release can be rebuilt without moving the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows (sender + receiver + app)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Rust
+        run: rustup update stable && rustup default stable
+
+      # bindgen generates the NVENC bindings from the vendored headers and needs
+      # libclang. The runner image ships LLVM, but not on PATH for bindgen.
+      - name: Locate libclang
+        shell: bash
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> $GITHUB_ENV
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build sender and receiver
+        run: cargo build --release -p lanrec-cli -p lanrec-recv
+
+      - name: Test
+        run: cargo test --release -p lanrec-core -p lanrec-wire
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Build desktop app
+        working-directory: app
+        run: |
+          npm ci
+          npm run tauri build
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/lanrec.exe dist/
+          cp target/release/lanrec-recv.exe dist/
+          cp README.md LICENSE NOTICE.md dist/
+          cd dist && 7z a ../lanrec-windows-x86_64.zip ./* && cd ..
+
+          # The installer lands under a version directory that changes with the
+          # release, so find it rather than hardcoding the path.
+          mkdir -p installer
+          find target/release/bundle -name "*.exe" -o -name "*.msi" | while read -r f; do
+            cp "$f" installer/
+          done
+          if [ -n "$(ls -A installer)" ]; then
+            7z a lanrec-windows-installer.zip ./installer/*
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: lanrec-windows-*.zip
+          if-no-files-found: error
+
+  receiver:
+    name: Receiver (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macos-universal
+          - os: ubuntu-latest
+            name: linux-x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Rust
+        run: rustup update stable && rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Only the receiver: the rest of the workspace needs Windows, D3D11 and an
+      # NVIDIA GPU. lanrec-recv depends on nothing but std.
+      - name: Build receiver (macOS, universal)
+        if: runner.os == 'macOS'
+        run: |
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release -p lanrec-recv --target aarch64-apple-darwin
+          cargo build --release -p lanrec-recv --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create -output dist/lanrec-recv \
+            target/aarch64-apple-darwin/release/lanrec-recv \
+            target/x86_64-apple-darwin/release/lanrec-recv
+          lipo -info dist/lanrec-recv
+
+      - name: Build receiver (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --release -p lanrec-recv
+          mkdir -p dist
+          cp target/release/lanrec-recv dist/
+
+      - name: Test wire format
+        run: cargo test --release -p lanrec-wire
+
+      - name: Package
+        run: |
+          cp README.md LICENSE NOTICE.md dist/
+          tar -czf lanrec-recv-${{ matrix.name }}.tar.gz -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: lanrec-recv-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [windows, receiver]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec cp {} release/ \;
+          ls -la release
+          cd release && sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" \
+            --title "lanrec $TAG" \
+            --notes-file .github/RELEASE_NOTES.md \
+            --verify-tag \
+            release/* \
+          || gh release upload "$TAG" release/* --clobber

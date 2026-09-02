@@ -11,7 +11,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use socket2::{Domain, Socket, Type};
 
@@ -23,7 +23,7 @@ use lanrec_core::nvenc::encoder::{Encoder, FileSink, FrameSink};
 use lanrec_core::nvenc::{self, Nvenc};
 use lanrec_core::pace::{Pacer, Source, Step};
 use lanrec_core::profile::{BitDepth, Chroma, Profile, RateControl};
-use lanrec_wire::{write_end, write_frame, write_info, Kind, StreamInfo, FLAG_KEYFRAME};
+use lanrec_wire::{FLAG_KEYFRAME, Kind, StreamInfo, write_end, write_frame, write_info};
 
 /// Matches the receiver. The OS default stalls a few-hundred-Mbit/s stream.
 const SOCKET_BUFFER: usize = 8 << 20;
@@ -178,10 +178,11 @@ fn run(
                 }
 
                 let texture = match source {
-                    Source::Held => held
-                        .replace(frame)
-                        .context("Pacer wollte den gehaltenen Frame, es gab aber keinen")?
-                        .texture,
+                    Source::Held => {
+                        held.replace(frame)
+                            .context("Pacer wollte den gehaltenen Frame, es gab aber keinen")?
+                            .texture
+                    }
                     Source::Incoming => {
                         held = None;
                         frame.texture
@@ -423,7 +424,10 @@ fn measure_capture(seconds: u64, fps: u32, monitor: Option<usize>) -> Result<()>
     let rate = |n: u64| if span_s > 0.0 { n as f64 / span_s } else { 0.0 };
     let total = fresh + repeats;
 
-    println!("Eingang       {captured} Frames  ({:.1} fps)", rate(captured));
+    println!(
+        "Eingang       {captured} Frames  ({:.1} fps)",
+        rate(captured)
+    );
     println!("Ausgang       {total} Frames  ({:.1} fps)", rate(total));
     println!("  davon neu   {fresh}");
     println!("  Wiederholt  {repeats} (Slots ohne Bildaenderung)");
@@ -542,9 +546,5 @@ fn show_caps() -> Result<()> {
 }
 
 fn yes_no(b: bool) -> &'static str {
-    if b {
-        "ja"
-    } else {
-        "nein"
-    }
+    if b { "ja" } else { "nein" }
 }

@@ -29,7 +29,11 @@ pub enum BitDepth {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "lowercase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "mode",
+    rename_all = "lowercase",
+    rename_all_fields = "camelCase"
+)]
 pub enum RateControl {
     /// Constant quality. Bitrate floats with scene complexity, which is the right
     /// choice when the link has headroom to spare.
@@ -131,7 +135,10 @@ pub fn validate(profile: &Profile, caps: &GpuCaps, link_bps: Option<u64>) -> Vec
     let Some(c) = caps.codecs.iter().find(|c| c.codec == profile.codec) else {
         issues.push(Issue {
             blocking: true,
-            message: format!("{} wird von dieser GPU nicht unterstuetzt", profile.codec.label()),
+            message: format!(
+                "{} wird von dieser GPU nicht unterstuetzt",
+                profile.codec.label()
+            ),
         });
         return issues;
     };

@@ -12,7 +12,14 @@
     non_snake_case,
     dead_code,
     unused_imports,
-    unnecessary_transmutes
+    unnecessary_transmutes,
+    // Generated bitfield accessors: bindgen writes them without safety docs and
+    // with usize-to-isize offsets. Not ours to fix.
+    clippy::missing_safety_doc,
+    clippy::ptr_offset_with_cast,
+    clippy::useless_transmute,
+    // FFI signatures mirror the C API; the arity is not ours to choose.
+    clippy::too_many_arguments
 )]
 
 include!(concat!(env!("OUT_DIR"), "/nvenc_sys.rs"));

@@ -10,12 +10,11 @@
 //! own. That copy stays on the GPU: about 850 MB/s at 1440p60, against roughly
 //! 288 GB/s of memory bandwidth on the target card.
 
-use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
-use windows::core::Interface;
+use anyhow::{Context, Result, bail};
 use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
@@ -24,14 +23,17 @@ use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
 use windows::Graphics::DirectX::DirectXPixelFormat;
 use windows::Graphics::SizeInt32;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
-    D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
 };
-use windows::Win32::Graphics::Dxgi::{IDXGIAdapter, IDXGIDevice, IDXGIOutput, DXGI_ERROR_NOT_FOUND};
+use windows::Win32::Graphics::Dxgi::{
+    DXGI_ERROR_NOT_FOUND, IDXGIAdapter, IDXGIDevice, IDXGIOutput,
+};
 use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
+use windows::core::Interface;
 
 use crate::d3d::Gpu;
 
@@ -188,7 +190,9 @@ impl Capture {
         // not to. Older builds do not know the setting, hence the ignored error.
         let _ = session.SetIsBorderRequired(false);
 
-        session.StartCapture().context("StartCapture fehlgeschlagen")?;
+        session
+            .StartCapture()
+            .context("StartCapture fehlgeschlagen")?;
 
         Ok(Self {
             session,
@@ -246,15 +250,18 @@ fn on_frame(
         .context("TryGetNextFrame fehlgeschlagen")?;
 
     // SystemRelativeTime is QPC-derived, in 100 ns units.
-    let timestamp_ns = frame.SystemRelativeTime().context("SystemRelativeTime")?.Duration as u64
+    let timestamp_ns = frame
+        .SystemRelativeTime()
+        .context("SystemRelativeTime")?
+        .Duration as u64
         * 100;
 
     let surface = frame.Surface().context("Frame ohne Surface")?;
     let access: IDirect3DDxgiInterfaceAccess = surface
         .cast()
         .context("Surface exposes no IDirect3DDxgiInterfaceAccess")?;
-    let src: ID3D11Texture2D = unsafe { access.GetInterface() }
-        .context("Surface haelt keine ID3D11Texture2D")?;
+    let src: ID3D11Texture2D =
+        unsafe { access.GetInterface() }.context("Surface haelt keine ID3D11Texture2D")?;
 
     // WGC recycles this texture as soon as the handler returns, so take a copy we
     // control. GPU to GPU -- nothing crosses the bus.

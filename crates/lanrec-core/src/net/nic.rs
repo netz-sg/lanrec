@@ -9,18 +9,20 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::Serialize;
 
 use crate::config::Labels;
 use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS, WIN32_ERROR};
 use windows::Win32::NetworkManagement::IpHelper::{
-    GetAdaptersAddresses, GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST,
-    GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH,
-    IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IF_TYPE_SOFTWARE_LOOPBACK,
+    GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+    GAA_FLAG_SKIP_MULTICAST, GetAdaptersAddresses, IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211,
+    IF_TYPE_SOFTWARE_LOOPBACK, IP_ADAPTER_ADDRESSES_LH,
 };
 use windows::Win32::NetworkManagement::Ndis::IfOperStatusUp;
-use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6};
+use windows::Win32::Networking::WinSock::{
+    AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_IN, SOCKADDR_IN6,
+};
 
 /// Physical medium of an adapter, as far as we care about it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -77,7 +79,10 @@ impl Nic {
             return (Suitability::Unusable, Some("Loopback-Adapter"));
         }
         if !self.up {
-            return (Suitability::Unusable, Some("kein Link - Kabel steckt nicht"));
+            return (
+                Suitability::Unusable,
+                Some("kein Link - Kabel steckt nicht"),
+            );
         }
         if self.medium == Medium::WiFi {
             return (
@@ -92,7 +97,10 @@ impl Nic {
             );
         }
         if self.ipv4.is_empty() {
-            return (Suitability::Marginal, Some("keine IPv4-Adresse konfiguriert"));
+            return (
+                Suitability::Marginal,
+                Some("keine IPv4-Adresse konfiguriert"),
+            );
         }
         if !self.jumbo_frames() {
             return (

@@ -11,14 +11,14 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{
-    ID3D11DeviceContext, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+    D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, ID3D11DeviceContext, ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::core::Interface;
 
-use super::{sys, Codec, Nvenc, Session};
+use super::{Codec, Nvenc, Session, sys};
 
 /// Where finished frames go.
 ///
@@ -446,4 +446,3 @@ fn create_input_texture(gpu: &Gpu, width: u32, height: u32) -> Result<ID3D11Text
         .context("Encoder-Eingangstextur anlegen")?;
     tex.context("CreateTexture2D lieferte keine Textur")
 }
-

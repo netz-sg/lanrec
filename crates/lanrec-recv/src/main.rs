@@ -16,7 +16,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use lanrec_wire::{read_frame, Kind, StreamInfo};
+use lanrec_wire::{Kind, StreamInfo, read_frame};
 use socket2::{Domain, Socket, Type};
 
 /// Big enough that the disk is written in large chunks rather than per frame.
@@ -29,7 +29,11 @@ const WRITE_BUFFER: usize = 4 << 20;
 const SOCKET_BUFFER: usize = 8 << 20;
 
 #[derive(Parser)]
-#[command(name = "lanrec-recv", about = "Receive a lanrec stream and write it to disk", version)]
+#[command(
+    name = "lanrec-recv",
+    about = "Receive a lanrec stream and write it to disk",
+    version
+)]
 struct Cli {
     /// Address to listen on. Use the IP of the direct link, not 0.0.0.0, unless
     /// you mean to accept from anywhere.
@@ -80,15 +84,17 @@ fn listen(addr: &str) -> Result<TcpListener> {
         .parse()
         .with_context(|| format!("{addr} ist keine gueltige Adresse (z.B. 10.0.0.2:9000)"))?;
 
-    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, None)
-        .context("Socket anlegen")?;
+    let socket =
+        Socket::new(Domain::for_address(addr), Type::STREAM, None).context("Socket anlegen")?;
     socket.set_reuse_address(true).ok();
     // Best effort: some systems clamp this, and a clamped buffer is still better
     // than refusing to start.
     if let Err(e) = socket.set_recv_buffer_size(SOCKET_BUFFER) {
         eprintln!("Hinweis: Empfangspuffer konnte nicht auf {SOCKET_BUFFER} gesetzt werden: {e}");
     }
-    socket.bind(&addr.into()).with_context(|| format!("an {addr} binden"))?;
+    socket
+        .bind(&addr.into())
+        .with_context(|| format!("an {addr} binden"))?;
     socket.listen(16).context("listen")?;
 
     Ok(socket.into())
@@ -143,7 +149,8 @@ fn receive(stream: TcpStream, cli: &Cli) -> Result<()> {
     while let Some(h) = read_frame(&mut input, &mut payload)? {
         match h.kind {
             Kind::Video => {
-                out.write_all(&payload).context("auf die Platte schreiben")?;
+                out.write_all(&payload)
+                    .context("auf die Platte schreiben")?;
                 frames += 1;
                 bytes += payload.len() as u64;
                 if h.is_keyframe() {
@@ -175,7 +182,12 @@ fn receive(stream: TcpStream, cli: &Cli) -> Result<()> {
     let secs = started.elapsed().as_secs_f64().max(1e-9);
 
     println!("\r  {frames} Frames, davon {keyframes} Keyframes          ");
-    println!("  {:.1} MB in {:.1}s  ({:.0} Mbit/s)", bytes as f64 / 1e6, secs, bytes as f64 * 8.0 / 1e6 / secs);
+    println!(
+        "  {:.1} MB in {:.1}s  ({:.0} Mbit/s)",
+        bytes as f64 / 1e6,
+        secs,
+        bytes as f64 * 8.0 / 1e6 / secs
+    );
     println!("  {}", path.display());
 
     if !clean_end {
@@ -195,9 +207,5 @@ fn generated_name(info: &StreamInfo) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let fps = (info.fps_num as f64 / info.fps_den.max(1) as f64).round() as u32;
-    format!(
-        "lanrec-{secs}-{}p{fps}.{}",
-        info.height,
-        info.extension()
-    )
+    format!("lanrec-{secs}-{}p{fps}.{}", info.height, info.extension())
 }
