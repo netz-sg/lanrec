@@ -1,207 +1,337 @@
 # lanrec
 
-Nimmt einen Gaming-PC (Windows) über eine direkte Ethernet-Strecke auf einem
-zweiten Rechner (macOS, Linux, Windows) auf. Alles bleibt auf der GPU: Capture,
-Encode und Versand berühren den Systemspeicher nie, und der Empfänger dekodiert
-nichts -- er schreibt nur.
+Record a Windows gaming PC over a direct Ethernet cable to a second machine, at
+a quality where the compression is not the limiting factor.
 
-> Der Empfänger hängt an nichts als `std`. Der Sender braucht Windows, D3D11 und
-> eine NVIDIA-GPU.
+*[Deutsche Fassung](README.de.md)*
 
-## Zielkonfiguration
+---
 
-| | |
+## What it does
+
+You are playing on one machine and want a clean recording without that machine
+doing the recording. lanrec captures the screen, encodes it on the GPU's video
+engine, and streams it over a dedicated Ethernet link to a second computer that
+writes it to disk.
+
+Nothing on the hot path touches system memory. The captured frame arrives as a
+GPU texture, is handed to NVENC as a GPU texture, and leaves as a compressed
+bitstream. The receiver never decodes anything — it appends framed payloads to a
+file, so it stays close to idle even at a few hundred megabits per second.
+
+**Sender** needs Windows, Direct3D 11 and an NVIDIA GPU.
+**Receiver** depends on nothing but the Rust standard library. It builds on
+macOS, Linux and Windows.
+
+### Why not just use a capture card?
+
+If you want *literally zero* load on the gaming PC, buy an HDMI capture card —
+that is the honest answer, and this tool will not beat it. lanrec exists for the
+case where you would rather spend nothing and accept ~0–3 % GPU utilisation for
+the encoder block, which is otherwise sitting idle anyway.
+
+### Why not just use OBS?
+
+OBS with an SRT output does roughly this, and if that already works for you, use
+it. lanrec is narrower on purpose: one link, one profile, no scene graph, and
+every design decision tuned for a direct cable rather than the general case. It
+also tells you *why* a setting is bad for your hardware instead of letting you
+find out at encoder init.
+
+## How it works
+
+```
+Gaming PC (Windows)                          Receiver (anywhere)
+───────────────────                          ───────────────────
+Windows.Graphics.Capture
+  → ID3D11Texture2D                stays in GPU memory
+        │
+      pace                         fixed-rate grid, reports empty slots
+        │
+      NVENC                        texture in, bitstream out — zero copy
+        │
+      wire                         [magic│ver│kind│pts│dts│flags│len][payload]
+        │
+       TCP  ──────────────────────────────────→  TCP
+                                                   │
+                                                 file            no re-encode
+```
+
+## Quick start
+
+On the receiver:
+
+```sh
+cargo run --release -p lanrec-recv -- --listen 10.0.0.2:9000 --out-dir ~/recordings
+```
+
+On the gaming PC:
+
+```sh
+cargo run --release -p lanrec-cli -- send --to 10.0.0.2:9000 --seconds 600
+```
+
+Record locally, no network involved:
+
+```sh
+lanrec record --seconds 30 --qp 14 -o out.hevc
+```
+
+Find out what your machine can actually do:
+
+```sh
+lanrec caps        # what the encoder really supports, queried from the driver
+lanrec nics        # adapters, link state, negotiated rate, MTU
+lanrec monitors    # capturable displays
+lanrec capture     # measure capture and pacing without encoding anything
+```
+
+There is also a desktop app (Tauri + React) with a live preview, the adapter
+list with link status, and quality settings with a live bitrate estimate:
+
+```sh
+cd app && npm install && npm run tauri dev
+```
+
+## The bandwidth reality
+
+This is the constraint everything else follows from.
+
+| Signal | Bitrate |
 |---|---|
-| Quelle | 2560x1440, Spiel mit 144-165 Hz, Aufnahme 60 fps |
-| GPU | RTX 4060 Ti (Ada, AD106), 1x NVENC 8. Gen |
-| Netz | 1 GbE Direktverbindung PC <-> Mac, statische IPs, MTU 9000 |
-| Codec | HEVC, YUV 4:4:4 10-bit, Profil FREXT |
-| Rate Control | CQP 14-16 (nicht CBR) |
-| Erwartete Bitrate | 150-350 Mbit/s, also ~35 % der Leitung |
+| 1440p60 raw, 4:4:4 10-bit | 6.6 Gbit/s |
+| 1440p60 raw, 4:2:0 8-bit | 2.7 Gbit/s |
+| **1440p60 HEVC 4:4:4 10-bit, CQP 14–16** | **150–350 Mbit/s** |
+| Usable on a gigabit link | ~940 Mbit/s |
 
-## Benutzung
+Truly lossless is impossible over gigabit. What *is* possible is a quality level
+where the difference from lossless is not findable in a still-frame comparison,
+using about a third of the link.
 
-Auf dem Empfänger (Mac, Linux, PC):
+## Design decisions
 
-    cargo run --release -p lanrec-recv -- --listen 10.0.0.2:9000 --out-dir ~/Aufnahmen
+Each of these is a decision that could reasonably have gone the other way.
 
-Auf dem Gaming-PC:
+### HEVC 4:4:4, not AV1
 
-    cargo run --release -p lanrec-cli -- send --to 10.0.0.2:9000 --seconds 600
+AV1 is more efficient per bit. It is also, on Ada, limited to 4:2:0 — verified by
+querying the driver rather than trusting the spec sheet:
 
-Lokal aufnehmen, ohne Netz:
+```
+             4:4:4   10-bit   lossless   max
+HEVC          yes     yes       yes      8192x8192
+AV1         → no      yes       no       8192x8192
+H.264         yes     no        yes      4096x4096
+```
 
-    lanrec record --seconds 30 --qp 14 -o out.hevc
+Efficiency is not the binding constraint here; there are ~600 Mbit/s of headroom.
+What you actually see is chroma subsampling destroying HUD text, thin coloured
+lines and saturated flat areas. You do not see AV1's advantage at this bitrate.
 
-Was die Maschine kann, und worüber gesendet werden soll:
+lanrec queries these capabilities at startup and only offers settings that will
+survive encoder initialisation. Switch the codec to AV1 in the UI and 4:4:4
+greys out, because on this hardware it genuinely cannot work.
 
-    lanrec caps                        # was der Encoder wirklich unterstuetzt
-    lanrec nics                        # Adapter, Link-Status, ausgehandelte Rate
-    lanrec rename 24:4B:.. "Zum Mac"   # Adapter benennen
-    lanrec monitors                    # aufnehmbare Displays
-    lanrec capture --seconds 10        # nur messen, nichts kodieren
+### 10-bit even for SDR content
 
-Die grafische Oberfläche (Tauri) zeigt Live-Vorschau, Adapter mit Link-Status,
-Qualitätseinstellungen mit Bitratenschätzung und die benannten Verbindungen:
+The source is 8-bit BGRA — the desktop compositor does not produce anything
+else for SDR. The extra precision is used by the *encoder*, and encoding is
+where banding in gradients (sky, smoke, fog) gets introduced. It costs almost
+nothing on Ada.
 
-    cd app && npm install && npm run tauri dev
+### CQP, not CBR
 
-## Warum diese Entscheidungen
+Constant quality rather than constant bitrate. Quiet scenes use less of the
+link, explosions are allowed to spike. There is no bitrate target to hit because
+the link is not the bottleneck.
 
-**HEVC 4:4:4 statt AV1.** AV1 ist auf Ada auf 4:2:0 beschränkt -- vom Treiber
-abgefragt, nicht vermutet. AV1 wäre pro Bit effizienter, aber Effizienz ist hier
-das Problem nicht: es sind ~600 Mbit/s Reserve auf der Leitung. Der sichtbare
-Gewinn liegt in 4:4:4, weil Chroma-Subsampling HUD-Text, dünne Linien und
-gesättigte Farbflächen zerstört. Das sieht man, den AV1-Vorteil bei dieser
-Bitrate nicht.
+### TCP, not SRT
 
-**10-bit auch bei SDR.** Die Quelle ist 8-bit BGRA, aber die zusätzliche
-Präzision nutzt der *Encoder* -- und genau dort entsteht Banding in Verläufen.
+SRT was the original plan, and over a switch or a WAN it remains the right
+answer. On a direct cable between two machines there is no competing traffic, no
+congestion and effectively no loss — SRT's retransmission machinery buys nothing
+there while costing a C dependency on both platforms. A *recording* also does
+not care about the latency spike of a TCP retransmit; it cares that every byte
+arrives.
 
-**CQP statt CBR.** Konstante Qualität statt konstanter Bitrate. Ruhige Szenen
-belegen weniger Leitung, Explosionen dürfen ausschlagen. Es gibt kein
-Bitratenziel zu treffen, weil die Leitung nicht der Engpass ist.
+The framing is transport-neutral. Swapping in SRT touches only the socket.
 
-**TCP statt SRT.** Ursprünglich war SRT geplant, und über einen Switch oder eine
-WAN-Strecke bleibt es die richtige Antwort. Auf einem Direktkabel zwischen zwei
-Maschinen gibt es aber keinen konkurrierenden Verkehr, keine Congestion und
-praktisch keinen Verlust -- SRTs Retransmission-Maschinerie bringt dort nichts
-und kostet eine C-Abhängigkeit auf beiden Plattformen. Eine Aufnahme interessiert
-sich auch nicht für die Latenzspitze eines TCP-Retransmits, sondern dafür, dass
-jedes Byte ankommt. Das Framing ist transportneutral; ein Wechsel auf SRT
-berührt nur den Socket.
+Both ends raise their socket buffer to 8 MB. The OS default stalls a
+few-hundred-megabit stream: the window closes, the sender blocks, and the
+capture queue behind it starts dropping frames.
 
-## Auf dieser GPU geprüft
+### Frames are repeated into empty slots
 
-RTX 4060 Ti (Ada, AD106), NVENC-API 13.1, eine Encoder-Engine:
+This one came out of a measurement that contradicted the design.
 
-| Codec | 4:4:4 | 10-bit | lossless | max |
-|---|---|---|---|---|
-| HEVC | ja | ja | ja | 8192x8192 |
-| AV1 | **nein** | ja | nein | 8192x8192 |
-| H.264 | ja | nein | ja | 4096x4096 |
+Windows.Graphics.Capture is driven by the compositor, not by vblank. Where
+nothing changes, nothing is delivered. Measured on the target machine, an idle
+165 Hz desktop produces about **48 frames per second**:
 
-Die Werte werden zur Laufzeit beim Treiber erfragt, nicht aus dem Modellnamen
-abgeleitet. Die UI bietet dadurch nur Einstellungen an, die die
-Encoder-Initialisierung überleben.
+```
+$ lanrec capture --seconds 6 --fps 60
 
-## WGC liefert nur bei Bildänderung
+Input       289 frames  (48.2 fps)
+Output      360 frames  (60.0 fps)
+  new       289
+  repeated   71
+```
 
-Gemessen: ein ruhender 165-Hz-Desktop liefert rund **48 Frames pro Sekunde**,
-nicht 165. Windows.Graphics.Capture hängt am Compositor, nicht am Vblank -- wo
-sich nichts ändert, gibt es nichts zu liefern.
+A constant-rate stream therefore has to fill those slots itself. Without it, a
+recording of a paused game becomes a hole in the timeline and everything after
+it drifts — the kind of error you discover during editing.
 
-Für einen Strom mit konstanter Bildrate heißt das: leere Slots müssen selbst
-gefüllt werden, sonst wird die Aufnahme eines pausierten Spiels zur Lücke im
-Zeitstrahl und alles danach verschiebt sich. Der Pacer meldet solche Slots als
-`gap_slots`; der Consumer kodiert den vorherigen Frame erneut. Wiederholungen
-identischen Inhalts kosten fast keine Bitrate.
+The pacer reports empty slots as `gap_slots` and leaves the policy to the
+caller: a recording repeats the previous frame (identical content costs almost
+no bitrate), a live view might rather skip.
 
-    lanrec capture --seconds 6 --fps 60
+### 165 → 60 will always judder a little
 
-    Eingang       289 Frames  (48.2 fps)
-    Ausgang       360 Frames  (60.0 fps)
-      davon neu   289
-      Wiederholt   71
+165 / 60 = 2.75. Not an integer ratio, so runs of 2 and 3 frames have to be
+discarded alternately no matter what. That judder cannot be removed, only
+distributed.
 
-## Das 165-zu-60-Problem
+Taking "the first frame at or after each tick" is causal and free, but the
+selection error swings across a full input interval (6.1 ms at 165 Hz) in a
+pattern that beats against the output rate — visible as irregular stutter.
+lanrec holds one frame back instead, so each tick picks whichever of its two
+neighbours is closer. That halves the worst-case error to ±3 ms and makes it
+uniform, at the cost of exactly one input frame of latency.
 
-165 / 60 = 2,75, kein ganzzahliges Verhältnis. Jede Aufnahme mit 60 fps aus einer
-165-Hz-Quelle bekommt ein periodisches Mikro-Ruckeln, weil abwechselnd 2 und 3
-Frames verworfen werden. Das ist nicht behebbar, nur verteilbar.
+**The clean fix is on your side:** cap the game at 120 fps and record at 60. A
+2:1 ratio has no ambiguity at all.
 
-Die Frame-Auswahl ist deshalb timestamp-basiert und hält einen Frame zurück: für
-jeden Slot gewinnt der nähere der beiden Nachbarn. Das halbiert den
-Auswahlfehler auf +/-3 ms und macht ihn gleichmäßig, zum Preis eines einzigen
-Eingangsframes Latenz.
+### The preview does not read back frames
 
-Sauberste Lösung bleibt: Spiel auf 120 fps cappen -> 2:1 -> perfekt glatt.
+Reading a full 1440p frame to show a 320-pixel-wide preview would push ~850 MB/s
+across the bus — precisely what this pipeline exists to avoid. Instead the frame
+goes into mip 0 of a texture with a mip chain, `GenerateMips` fills the rest, and
+only mip 3 (320×180) is read back and JPEG-encoded for the UI.
 
-## Architektur
+It runs on its own thread with its own D3D11 device, so the preview can never
+contend with a running recording for the same context.
 
-    Gaming-PC (Windows)                        Empfaenger
-    -------------------                        ----------
-    WGC -> ID3D11Texture2D (bleibt auf GPU)
-      |
-    pace  (Timestamp-Grid, Luecken melden)
-      |
-    NVENC (D3D11-Textur als Input, Zero-Copy)
-      |
-    wire  [magic|version|kind|pts|dts|flags|len][payload]
-      |
-    TCP  ------------------------------------>  TCP
-                                                  |
-                                                Datei (kein Re-Encode)
+## Repository layout
 
-### Crates
+```
+crates/lanrec-wire/    Wire format. No platform dependencies.
+crates/lanrec-core/    Capture, encode, pacing, preview, adapters. Windows.
+crates/lanrec-cli/     Sender, headless.
+crates/lanrec-recv/    Receiver. Builds anywhere.
+app/                   Tauri 2 + React desktop app.
+vendor/                nv-codec-headers (NVENC API, MIT) — see NOTICE.md
+```
 
-    crates/lanrec-wire/    Rahmenformat. Keine Plattformabhaengigkeiten.
-    crates/lanrec-core/    Capture, Encode, Pacing, Vorschau, Adapter. Windows.
-    crates/lanrec-cli/     Sender, headless.
-    crates/lanrec-recv/    Empfaenger. Baut ueberall.
-    app/                   Tauri 2 + React. Oberflaeche.
-    vendor/                nv-codec-headers (NVENC-API, MIT) -- siehe NOTICE.md
+The core deliberately depends on no UI. When a recording drops frames, the first
+question is always whether the app or the pipeline is at fault — so the pipeline
+has to be startable and measurable without a window.
 
-Der Kern hängt bewusst an keiner UI. Wenn eine Aufnahme Frames verliert, ist die
-erste Frage immer, ob die App oder die Pipeline schuld ist -- deshalb muss sich
-letztere ohne Fenster starten und messen lassen.
+### The wire format
 
-### Eigenes Framing statt MPEG-TS
+Both ends are ours, so the stream needs no container. MPEG-TS would force PCR
+handling, 188-byte padding and a 90 kHz timestamp grid. A fixed 32-byte header
+keeps nanosecond timestamps and leaves room for metadata a container has no
+place for:
 
-Beide Enden sind unter eigener Kontrolle. MPEG-TS würde PCR-Handling,
-188-Byte-Padding und ein 90-kHz-PTS-Raster aufzwingen. Der 32-Byte-Header behält
-Nanosekunden-Timestamps und lässt Platz für Metadaten, für die ein Container
-keinen Ort hätte.
+```
+magic  u32   "LANR"
+version u16
+kind   u16   info | video | audio | end
+pts    u64   nanoseconds
+dts    u64
+flags  u32   bit 0 = keyframe
+len    u32
+```
 
-## Zwei Fallen, die M1 gekostet hat
+A JSON `StreamInfo` message precedes the media, so the receiver can report the
+geometry and name the file without parsing the bitstream.
 
-**Ein Immediate Context, zwei Threads.** Capture läuft auf einem
-Threadpool-Thread, der Encoder auf dem Aufrufer. Beide brauchen denselben
-`ID3D11DeviceContext`, und der ist ausdrücklich nicht nebenläufig benutzbar. Ein
-geklonter Context statt eines gemeinsamen Locks legt den Treiber lahm -- ohne
-Fehler, ohne Absturz, der Prozess macht einfach keinen Fortschritt mehr. `Gpu`
-gibt deshalb nur noch den Lock heraus, nie den nackten Context.
+### NVENC bindings
 
-**`nvEncLockBitstream` blockiert auf leerem Puffer.** Im synchronen Betrieb ohne
-B-Frames wird nach jedem Encode gesperrt und geleert, es bleibt also nie etwas
-hängen. Ein zusätzliches Lock beim EOS-Flush meldet dann nicht "leer", sondern
-wartet ewig auf Daten, die nie kommen.
+Generated at build time from vendored `nv-codec-headers` (MIT, no NVIDIA account
+required). Two things that are easy to get wrong and were worth automating:
 
-## Bekannte Problemstellen
+- The header's codec GUIDs are `static const GUID`. bindgen turns those into
+  extern statics with no symbol to link against — it fails at link time, far from
+  the cause. They are extracted from the header text as real constants instead.
+- The `*_VER` struct-version constants come from a function-like macro that
+  bindgen silently skips. Without them the driver rejects every call with
+  `NV_ENC_ERR_INVALID_VERSION` and no hint as to which struct was at fault. They
+  are re-derived from the header rather than transcribed, because they change
+  between SDK releases.
 
-1. **Farbkonvertierung liegt beim Treiber.** NVENC bekommt BGRA und macht
-   RGB->YUV selbst. Welche Matrix und welcher Wertebereich dabei benutzt werden,
-   ist nicht unter unserer Kontrolle -- für ein Werkzeug mit dem Anspruch "beste
-   Qualität" ist das die nächste offene Stelle. Ein Compute-Shader, der die
-   Konvertierung explizit macht, löst das.
-2. **Audio fehlt.** Und damit die schwierigste Stelle des ganzen Projekts: die
-   Soundkarte läuft nicht exakt auf 48 kHz und ihre Uhr hat nichts mit QPC zu
-   tun. Ohne Drift-Korrektur ist der Ton nach ~40 min um 200-400 ms versetzt.
-3. **WGC-Session bricht ab** bei Alt-Tab, Auflösungswechsel, Fullscreen-Toggle.
-   Muss neu aufgebaut werden, ohne die Aufnahme zu unterbrechen.
-4. **Das Bitratenmodell ist geschätzt.** Log-linear, mit festen Faktoren für
-   Chroma, Tiefe und Codec. Es unterscheidet 150 von 400 Mbit/s zuverlässig, aber
-   nicht 230 von 250. Erst Messungen unter echter Spiellast kalibrieren es.
+API 13.1 also replaced `pixelBitDepthMinus8` with `inputBitDepth`/`outputBitDepth`
+enums — which is exactly why the bindings are generated and not written by hand.
 
-## Meilensteine
+## Two traps worth knowing about
 
-- [x] **M1** WGC -> NVENC -> lokale `.hevc`, Bitstrom auf NAL-Ebene verifiziert
-- [x] **M2** Framing + TCP, Empfänger schreibt die Datei
-- [x] Live-Vorschau (GPU-Downscale über die Mip-Kette, JPEG in die UI)
-- [ ] **M3** WASAPI-Loopback-Audio, A/V-Sync, Drift-Korrektur
-- [ ] **M4** Steuerkanal, Discovery, Reconnect
-- [ ] Eigene Farbkonvertierung, Bitratenmodell kalibrieren
+**One immediate context, two threads.** Capture runs on a thread-pool thread, the
+encoder on the caller's. Both need the same `ID3D11DeviceContext`, which is
+explicitly not safe for concurrent use. Handing out clones instead of a shared
+lock wedges the driver — no error, no crash, the process simply stops making
+progress. `Gpu` therefore only ever hands out the lock.
 
-## Build
+**`nvEncLockBitstream` blocks on an empty buffer.** In synchronous mode without
+B-frames the bitstream is locked and emptied after every encode, so nothing is
+ever pending. An extra lock during the EOS flush does not report "empty" — it
+waits forever for output that will never be produced.
 
-Voraussetzungen: siehe [`docs/setup.md`](docs/setup.md).
+## Known limitations
 
-    cargo build --release          # Kern, Sender, Empfaenger
-    cargo test --workspace
+1. **Colour conversion is the driver's.** NVENC receives BGRA and does RGB→YUV
+   itself. Which matrix and which range it uses is not under our control. For a
+   tool aiming at maximum quality this is the next thing to fix; a compute shader
+   doing the conversion explicitly solves it.
+2. **No audio yet.** And with it, the hardest part of the whole project: the
+   sound card does not run at exactly 48 kHz and its clock has nothing to do with
+   QPC. Without drift correction the audio is 200–400 ms out after ~40 minutes.
+3. **The WGC session breaks** on alt-tab, resolution changes and fullscreen
+   toggles. It needs to be rebuilt without interrupting the recording.
+4. **The bitrate estimate is a model, not a measurement.** Log-linear, with fixed
+   factors for chroma, depth and codec. It reliably tells 150 Mbit/s from 400,
+   and not 230 from 250. Calibrating it needs numbers from real gameplay.
 
-    cd app && npm install
-    npm run tauri dev
+## Status
 
-## Lizenz
+- [x] Capture → NVENC → local `.hevc`, bitstream verified at the NAL level
+- [x] Framing + TCP, receiver writes the file
+- [x] Live preview, adapter naming, quality settings
+- [ ] WASAPI loopback audio, A/V sync, drift correction
+- [ ] Control channel, discovery, reconnect
+- [ ] Explicit colour conversion; calibrate the bitrate model
 
-MIT, siehe [LICENSE](LICENSE). Fremdcode siehe [NOTICE.md](NOTICE.md).
+## Building
+
+Prerequisites are listed in [`docs/setup.md`](docs/setup.md): Rust (MSVC), VS
+Build Tools, the Windows SDK, LLVM for bindgen, and Node for the app.
+
+```sh
+cargo build --release      # core, sender, receiver
+cargo test --workspace
+
+cd app && npm install
+npm run tauri dev
+```
+
+The receiver alone needs none of the Windows tooling:
+
+```sh
+cargo build --release -p lanrec-recv
+```
+
+## Network setup
+
+For the direct link, static addresses on both ends and no DHCP:
+
+| | PC | Receiver |
+|---|---|---|
+| IP | 10.0.0.1/24 | 10.0.0.2/24 |
+| MTU | 9000 | 9000 |
+
+Jumbo frames noticeably reduce interrupt load at a few hundred megabits. Both
+ends must be set to 9000 or it fragments.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Third-party code is documented in
+[NOTICE.md](NOTICE.md).
