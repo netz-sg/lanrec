@@ -1,0 +1,18 @@
+[package]
+name = "lanrec-recv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "lanrec receiver -- writes an incoming stream to disk"
+
+[[bin]]
+name = "lanrec-recv"
+path = "src/main.rs"
+
+# Only std, so this builds and runs on macOS and Linux as well as Windows.
+[dependencies]
+lanrec-wire = { path = "../lanrec-wire" }
+anyhow.workspace = true
+clap.workspace = true
+serde_json = "1.0.151"
+socket2 = "0.6.5"

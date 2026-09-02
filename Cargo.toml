@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/lanrec-wire",
+    "crates/lanrec-core",
+    "crates/lanrec-cli",
+    "crates/lanrec-recv",
+    "app/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+# The capture path runs per frame at 60 Hz; LTO and a single codegen unit are
+# worth the longer build.
+lto = "thin"
+codegen-units = 1

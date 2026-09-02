@@ -1,0 +1,13 @@
+[package]
+name = "lanrec-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wire format shared by the lanrec sender and receiver"
+
+# Deliberately free of platform dependencies: the receiver builds on macOS, where
+# none of the Windows capture and encode machinery exists.
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json = "1"

@@ -1,0 +1,16 @@
+[package]
+name = "lanrec-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lanrec"
+path = "src/main.rs"
+
+[dependencies]
+lanrec-core = { path = "../lanrec-core" }
+anyhow.workspace = true
+clap.workspace = true
+lanrec-wire = { version = "0.1.0", path = "../lanrec-wire" }
+socket2 = "0.6.5"

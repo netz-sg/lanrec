@@ -1,0 +1,24 @@
+[package]
+name = "lanrec-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "lanrec - capture a gaming PC over Ethernet"
+
+[lib]
+# The `_lib` suffix keeps the library name distinct from the binary, which
+# otherwise collides on Windows. See rust-lang/cargo#8519.
+name = "lanrec_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+lanrec-core = { path = "../../crates/lanrec-core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde.workspace = true
+serde_json = "1"
+base64 = "0.23.1"
+anyhow.workspace = true

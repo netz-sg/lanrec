@@ -1,0 +1,23 @@
+# Rust
+/target
+
+# Frontend
+node_modules/
+app/dist/
+app/src-tauri/gen/
+*.tsbuildinfo
+
+# Recordings and captures
+/out
+*.hevc
+*.h265
+*.obu
+*.mkv
+*.mp4
+*.pcm
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
