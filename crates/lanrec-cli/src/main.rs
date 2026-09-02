@@ -353,7 +353,13 @@ struct NetSink<W: Write> {
 impl<W: Write> FrameSink for NetSink<W> {
     fn frame(&mut self, pts_ns: u64, keyframe: bool, data: &[u8]) -> Result<()> {
         let flags = if keyframe { FLAG_KEYFRAME } else { 0 };
-        write_frame(&mut self.out, Kind::Video, pts_ns, flags, data)
+        write_frame(&mut self.out, Kind::Video, pts_ns, flags, data)?;
+
+        // Flush per frame. The buffer exists so that a header and its payload
+        // leave as one write, not to batch frames: left to fill, it holds the
+        // whole recording of a quiet screen and the receiver sees nothing until
+        // the very end. One syscall per frame at 60 fps costs nothing.
+        self.out.flush().context("Frame absenden")
     }
 }
 

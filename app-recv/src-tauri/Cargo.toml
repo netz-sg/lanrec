@@ -1,0 +1,25 @@
+[package]
+name = "lanrec-recv-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "lanrec receiver - records an incoming stream to disk"
+
+[lib]
+# The `_lib` suffix keeps the library name distinct from the binary, which
+# otherwise collides on Windows. See rust-lang/cargo#8519.
+name = "lanrec_recv_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Only the receiver half, which depends on nothing platform-specific. That is
+# what lets this app build on macOS at all.
+lanrec-recv = { path = "../../crates/lanrec-recv" }
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde.workspace = true
+serde_json = "1"
+anyhow.workspace = true

@@ -90,12 +90,18 @@ lanrec monitors    # capturable displays
 lanrec capture     # measure capture and pacing without encoding anything
 ```
 
-There is also a desktop app (Tauri + React) with a live preview, the adapter
-list with link status, and quality settings with a live bitrate estimate:
+There are two desktop apps. The **sender** (`app/`) has a live preview, the
+adapter list with link status, and quality settings with a bitrate estimate. The
+**receiver** (`app-recv/`) shows what is arriving and where it lands, and ships
+as a DMG for Apple Silicon and Intel.
 
 ```sh
-cd app && npm install && npm run tauri dev
+cd app && npm install && npm run tauri dev            # sender, Windows
+cd app-recv && npm install && npm run tauri dev       # receiver, anywhere
 ```
+
+The receiver app wraps the same `lanrec-recv` library the CLI uses, so the two
+cannot drift apart.
 
 ## The bandwidth reality
 
@@ -257,8 +263,9 @@ contend with a running recording for the same context.
 crates/lanrec-wire/    Wire format. No platform dependencies.
 crates/lanrec-core/    Capture, encode, pacing, preview, adapters. Windows.
 crates/lanrec-cli/     Sender, headless.
-crates/lanrec-recv/    Receiver. Builds anywhere.
-app/                   Tauri 2 + React desktop app.
+crates/lanrec-recv/    Receiver, library plus CLI. Builds anywhere.
+app/                   Sender app (Tauri 2 + React). Windows.
+app-recv/              Receiver app. Builds anywhere.
 vendor/                nv-codec-headers (NVENC API, MIT) — see NOTICE.md
 ```
 

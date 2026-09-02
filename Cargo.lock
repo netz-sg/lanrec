@@ -2108,7 +2108,7 @@ dependencies = [
 
 [[package]]
 name = "lanrec-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2122,7 +2122,7 @@ dependencies = [
 
 [[package]]
 name = "lanrec-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2133,7 +2133,7 @@ dependencies = [
 
 [[package]]
 name = "lanrec-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -2146,18 +2146,32 @@ dependencies = [
 
 [[package]]
 name = "lanrec-recv"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
  "lanrec-wire",
+ "serde",
  "serde_json",
  "socket2",
 ]
 
 [[package]]
+name = "lanrec-recv-app"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "lanrec-recv",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+]
+
+[[package]]
 name = "lanrec-wire"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "serde",

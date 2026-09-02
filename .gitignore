@@ -4,7 +4,9 @@
 # Frontend
 node_modules/
 app/dist/
+app-recv/dist/
 app/src-tauri/gen/
+app-recv/src-tauri/gen/
 *.tsbuildinfo
 
 # Recordings and captures

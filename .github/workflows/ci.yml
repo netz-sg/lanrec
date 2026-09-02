@@ -18,9 +18,9 @@ jobs:
       - shell: bash
         run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $GITHUB_ENV
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --exclude lanrec-app
-      - run: cargo test --workspace --exclude lanrec-app
-      - run: cargo clippy --workspace --exclude lanrec-app -- -D warnings
+      - run: cargo build --workspace --exclude lanrec-app --exclude lanrec-recv-app
+      - run: cargo test --workspace --exclude lanrec-app --exclude lanrec-recv-app
+      - run: cargo clippy --workspace --exclude lanrec-app --exclude lanrec-recv-app -- -D warnings
       - run: cargo fmt --all -- --check
 
   receiver:

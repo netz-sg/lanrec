@@ -12,5 +12,5 @@ path = "src/main.rs"
 lanrec-core = { path = "../lanrec-core" }
 anyhow.workspace = true
 clap.workspace = true
-lanrec-wire = { version = "0.1.0", path = "../lanrec-wire" }
+lanrec-wire = { path = "../lanrec-wire" }
 socket2 = "0.6.5"

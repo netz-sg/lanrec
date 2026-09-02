@@ -18,7 +18,7 @@ env:
 
 jobs:
   windows:
-    name: Windows (sender + receiver + app)
+    name: Windows (sender, receiver, installer)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +40,7 @@ jobs:
         run: cargo build --release -p lanrec-cli -p lanrec-recv
 
       - name: Test
-        run: cargo test --release -p lanrec-core -p lanrec-wire
+        run: cargo test --release -p lanrec-core -p lanrec-wire -p lanrec-recv
 
       - uses: actions/setup-node@v4
         with:
@@ -48,7 +48,7 @@ jobs:
           cache: npm
           cache-dependency-path: app/package-lock.json
 
-      - name: Build desktop app
+      - name: Build sender app
         working-directory: app
         run: |
           npm ci
@@ -57,39 +57,98 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          mkdir -p dist
+          mkdir -p dist out
           cp target/release/lanrec.exe dist/
           cp target/release/lanrec-recv.exe dist/
           cp README.md LICENSE NOTICE.md dist/
-          cd dist && 7z a ../lanrec-windows-x86_64.zip ./* && cd ..
+          7z a out/lanrec-windows-x86_64.zip ./dist/*
 
           # The installer lands under a version directory that changes with the
-          # release, so find it rather than hardcoding the path.
-          mkdir -p installer
-          find target/release/bundle -name "*.exe" -o -name "*.msi" | while read -r f; do
-            cp "$f" installer/
-          done
-          if [ -n "$(ls -A installer)" ]; then
-            7z a lanrec-windows-installer.zip ./installer/*
+          # release, so find it rather than hardcoding the path. Uploaded as a
+          # plain .exe: an installer inside a zip is one click too many.
+          setup=$(find target/release/bundle/nsis -name "*-setup.exe" | head -1)
+          if [ -z "$setup" ]; then
+            echo "no NSIS installer produced" >&2
+            exit 1
           fi
+          cp "$setup" "out/lanrec-setup-windows-x64.exe"
+          ls -la out
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows
-          path: lanrec-windows-*.zip
+          path: out/*
           if-no-files-found: error
 
-  receiver:
-    name: Receiver (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
+  macos:
+    name: macOS receiver (${{ matrix.label }})
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
-            name: macos-universal
-          - os: ubuntu-latest
-            name: linux-x86_64
+          - target: aarch64-apple-darwin
+            label: apple-silicon
+          - target: x86_64-apple-darwin
+            label: intel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Rust
+        run: |
+          rustup update stable && rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app-recv/package-lock.json
+
+      # Only the receiver app. The sender needs Windows, D3D11 and an NVIDIA
+      # GPU; nothing in this app touches any of that.
+      - name: Build receiver app
+        working-directory: app-recv
+        run: |
+          npm ci
+          npm run tauri build -- --target ${{ matrix.target }}
+
+      - name: Build headless receiver
+        run: cargo build --release -p lanrec-recv --target ${{ matrix.target }}
+
+      - name: Test
+        run: cargo test --release -p lanrec-wire -p lanrec-recv
+
+      - name: Package
+        run: |
+          mkdir -p out cli
+          dmg=$(find target/${{ matrix.target }}/release/bundle/dmg -name "*.dmg" | head -1)
+          if [ -z "$dmg" ]; then
+            echo "no dmg produced" >&2
+            exit 1
+          fi
+          cp "$dmg" "out/lanrec-receiver-macos-${{ matrix.label }}.dmg"
+
+          cp target/${{ matrix.target }}/release/lanrec-recv cli/
+          cp README.md LICENSE NOTICE.md cli/
+          tar -czf "out/lanrec-recv-macos-${{ matrix.label }}.tar.gz" -C cli .
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.label }}
+          path: out/*
+          if-no-files-found: error
+
+  linux:
+    name: Linux receiver
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -100,44 +159,28 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Only the receiver: the rest of the workspace needs Windows, D3D11 and an
-      # NVIDIA GPU. lanrec-recv depends on nothing but std.
-      - name: Build receiver (macOS, universal)
-        if: runner.os == 'macOS'
-        run: |
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          cargo build --release -p lanrec-recv --target aarch64-apple-darwin
-          cargo build --release -p lanrec-recv --target x86_64-apple-darwin
-          mkdir -p dist
-          lipo -create -output dist/lanrec-recv \
-            target/aarch64-apple-darwin/release/lanrec-recv \
-            target/x86_64-apple-darwin/release/lanrec-recv
-          lipo -info dist/lanrec-recv
+      - name: Build receiver
+        run: cargo build --release -p lanrec-recv
 
-      - name: Build receiver (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          cargo build --release -p lanrec-recv
-          mkdir -p dist
-          cp target/release/lanrec-recv dist/
-
-      - name: Test wire format
-        run: cargo test --release -p lanrec-wire
+      - name: Test
+        run: cargo test --release -p lanrec-wire -p lanrec-recv
 
       - name: Package
         run: |
+          mkdir -p out dist
+          cp target/release/lanrec-recv dist/
           cp README.md LICENSE NOTICE.md dist/
-          tar -czf lanrec-recv-${{ matrix.name }}.tar.gz -C dist .
+          tar -czf out/lanrec-recv-linux-x86_64.tar.gz -C dist .
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}
-          path: lanrec-recv-*.tar.gz
+          name: linux
+          path: out/*
           if-no-files-found: error
 
   publish:
     name: Publish release
-    needs: [windows, receiver]
+    needs: [windows, macos, linux]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -149,7 +192,8 @@ jobs:
       - name: Collect
         run: |
           mkdir -p release
-          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec cp {} release/ \;
+          find artifacts -type f \( -name "*.zip" -o -name "*.tar.gz" -o -name "*.exe" -o -name "*.dmg" \) \
+            -exec cp {} release/ \;
           ls -la release
           cd release && sha256sum * > SHA256SUMS && cat SHA256SUMS
 
@@ -162,44 +206,52 @@ jobs:
 
           ## Downloads
 
-          | File | For |
-          |---|---|
-          | `lanrec-windows-x86_64.zip` | Gaming PC: sender (`lanrec.exe`) and receiver |
-          | `lanrec-windows-installer.zip` | Gaming PC: desktop app with live preview |
-          | `lanrec-recv-macos-universal.tar.gz` | Mac as the recording machine (Intel + Apple Silicon) |
-          | `lanrec-recv-linux-x86_64.tar.gz` | Linux as the recording machine |
+          **Gaming PC (Windows, NVIDIA)**
 
-          The sender needs Windows, Direct3D 11 and an NVIDIA GPU. The receiver
-          needs nothing but an OS and a disk.
+          | File | What it is |
+          |---|---|
+          | `lanrec-setup-windows-x64.exe` | Installer for the sender app, with live preview |
+          | `lanrec-windows-x86_64.zip` | Command line: `lanrec.exe` and `lanrec-recv.exe` |
+
+          **The machine that records**
+
+          | File | What it is |
+          |---|---|
+          | `lanrec-receiver-macos-apple-silicon.dmg` | Receiver app for M1 and later |
+          | `lanrec-receiver-macos-intel.dmg` | Receiver app for Intel Macs |
+          | `lanrec-recv-macos-*.tar.gz` | Command line receiver |
+          | `lanrec-recv-linux-x86_64.tar.gz` | Command line receiver for Linux |
+
+          The receiver needs nothing but an OS and a disk. It never decodes; it
+          writes what arrives.
 
           ## Getting started
 
-          On the machine that records:
+          Open the receiver app, check the address and press **Empfang starten**.
+          Then on the gaming PC:
 
           ```sh
-          ./lanrec-recv --listen 0.0.0.0:9000 --out-dir ~/recordings
+          lanrec.exe nics                                  # which cable is which
+          lanrec.exe send --to 10.0.0.2:9000 --via "Zum Mac" --seconds 600
           ```
 
-          On the gaming PC:
+          `--via` forces the stream onto one adapter instead of leaving the
+          choice to the routing table, and fails loudly if it did not take.
 
-          ```sh
-          lanrec.exe send --to <receiver-ip>:9000 --seconds 600
-          ```
+          ## Unsigned builds
 
-          Before the first run, `lanrec.exe caps` reports what your encoder can
-          actually do and `lanrec.exe nics` shows which adapter has a cable in it.
+          Nothing here is code-signed or notarised yet.
 
-          macOS quarantines unsigned binaries. Clear it with:
-
-          ```sh
-          xattr -d com.apple.quarantine lanrec-recv
-          ```
+          - **macOS** will refuse the app on first open. Right-click it in
+            Finder and choose *Open*, or clear the flag:
+            `xattr -dr com.apple.quarantine "/Applications/lanrec receiver.app"`
+          - **Windows** SmartScreen will warn. *More info* then *Run anyway*.
 
           ## Known limitations
 
           Colour conversion is currently the driver's, there is no audio yet, and
-          the bitrate estimate in the app is a model rather than a measurement.
-          All open points are listed in the README.
+          the bitrate estimate in the sender app is a model rather than a
+          measurement. All open points are listed in the README.
           NOTES
           cat notes.md
 
