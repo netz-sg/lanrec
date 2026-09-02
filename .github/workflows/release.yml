@@ -153,14 +153,67 @@ jobs:
           ls -la release
           cd release && sha256sum * > SHA256SUMS && cat SHA256SUMS
 
+      # Notes are generated rather than kept in a file, so every release
+      # describes the assets it actually shipped.
+      - name: Notes
+        run: |
+          cat > notes.md <<'NOTES'
+          Record a Windows gaming PC over a direct Ethernet link.
+
+          ## Downloads
+
+          | File | For |
+          |---|---|
+          | `lanrec-windows-x86_64.zip` | Gaming PC: sender (`lanrec.exe`) and receiver |
+          | `lanrec-windows-installer.zip` | Gaming PC: desktop app with live preview |
+          | `lanrec-recv-macos-universal.tar.gz` | Mac as the recording machine (Intel + Apple Silicon) |
+          | `lanrec-recv-linux-x86_64.tar.gz` | Linux as the recording machine |
+
+          The sender needs Windows, Direct3D 11 and an NVIDIA GPU. The receiver
+          needs nothing but an OS and a disk.
+
+          ## Getting started
+
+          On the machine that records:
+
+          ```sh
+          ./lanrec-recv --listen 0.0.0.0:9000 --out-dir ~/recordings
+          ```
+
+          On the gaming PC:
+
+          ```sh
+          lanrec.exe send --to <receiver-ip>:9000 --seconds 600
+          ```
+
+          Before the first run, `lanrec.exe caps` reports what your encoder can
+          actually do and `lanrec.exe nics` shows which adapter has a cable in it.
+
+          macOS quarantines unsigned binaries. Clear it with:
+
+          ```sh
+          xattr -d com.apple.quarantine lanrec-recv
+          ```
+
+          ## Known limitations
+
+          Colour conversion is currently the driver's, there is no audio yet, and
+          the bitrate estimate in the app is a model rather than a measurement.
+          All open points are listed in the README.
+          NOTES
+          cat notes.md
+
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          gh release create "$TAG" \
-            --title "lanrec $TAG" \
-            --notes-file .github/RELEASE_NOTES.md \
-            --verify-tag \
-            release/* \
-          || gh release upload "$TAG" release/* --clobber
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" \
+              --title "lanrec $TAG" \
+              --notes-file notes.md \
+              --verify-tag \
+              release/*
+          fi
