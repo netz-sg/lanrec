@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Quality, DEFAULT_PROFILE } from "./Quality";
 import { Drawer } from "./Drawer";
 import { Preview } from "./Preview";
+import { Send } from "./Send";
 import type { Evaluation, GpuCaps, NicView, Profile } from "./types";
 import "./App.css";
 
@@ -150,6 +151,13 @@ export default function App() {
       {capsError && <div className="alert">Encoder nicht verfügbar: {capsError}</div>}
 
       <Preview />
+
+      <Send
+        profile={profile}
+        link={target}
+        monitor={null}
+        blocked={evaluation?.issues.some((i) => i.blocking) ?? false}
+      />
 
       <SummaryBar
         profile={profile}

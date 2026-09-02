@@ -87,3 +87,28 @@ export interface PreviewFrame {
   width: number;
   height: number;
 }
+
+export interface SessionStatus {
+  destination: string;
+  via: string | null;
+  localAddr: string | null;
+
+  frames: number;
+  keyframes: number;
+  repeats: number;
+  bytes: number;
+  seconds: number;
+  bitrateBps: number;
+  peakFrameBytes: number;
+
+  pacedOut: number;
+  queueDropped: number;
+
+  finished: boolean;
+  error: string | null;
+}
+
+export interface SendView {
+  running: boolean;
+  status: SessionStatus | null;
+}

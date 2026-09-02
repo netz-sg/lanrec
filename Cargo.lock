@@ -2138,9 +2138,11 @@ dependencies = [
  "anyhow",
  "bindgen",
  "image",
+ "lanrec-wire",
  "regex",
  "serde",
  "serde_json",
+ "socket2",
  "windows 0.62.2",
 ]
 

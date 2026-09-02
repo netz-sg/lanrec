@@ -2,34 +2,25 @@
 //!
 //! Exists so the capture pipeline can be measured without the UI in the way:
 //! when a recording drops frames, the first question is always whether the app or
-//! the pipeline is at fault. It reads the same settings file as the app, so
-//! adapter names match in both.
+//! the pipeline is at fault. It reads the same settings file as the app, and
+//! drives the same `session::run`, so the two cannot behave differently.
 
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::net::{IpAddr, SocketAddr, TcpStream};
-use std::os::windows::io::AsRawSocket;
-use std::sync::Arc;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use socket2::{Domain, Socket, Type};
 
-use lanrec_core::capture::{self, Capture, MonitorInfo, Texture};
-use lanrec_core::clock;
+use lanrec_core::capture::{self, Capture, MonitorInfo};
 use lanrec_core::config::{self, Labels};
 use lanrec_core::d3d::Gpu;
-use lanrec_core::net::bind;
-use lanrec_core::net::nic::{self, Medium, NicView, Suitability};
-use lanrec_core::nvenc::encoder::{Encoder, FileSink, FrameSink};
-use lanrec_core::nvenc::{self, Nvenc};
-use lanrec_core::pace::{Pacer, Source, Step};
+use lanrec_core::net::nic::{self, Medium, Suitability};
+use lanrec_core::nvenc;
+use lanrec_core::pace::{Pacer, Step};
 use lanrec_core::profile::{BitDepth, Chroma, Profile, RateControl};
-use lanrec_wire::{FLAG_KEYFRAME, Kind, StreamInfo, write_end, write_frame, write_info};
-
-/// Matches the receiver. The OS default stalls a few-hundred-Mbit/s stream.
-const SOCKET_BUFFER: usize = 8 << 20;
+use lanrec_core::session::{self, SessionStatus, Target};
 
 #[derive(Parser)]
 #[command(name = "lanrec", about = "Capture a gaming PC over Ethernet", version)]
@@ -41,6 +32,7 @@ struct Cli {
 /// Encode settings shared by `record` and `send`.
 #[derive(clap::Args, Clone)]
 struct EncodeArgs {
+    /// How long to record. 0 means until Ctrl-C.
     #[arg(long, default_value_t = 10)]
     seconds: u64,
     #[arg(long, default_value_t = 60)]
@@ -86,11 +78,11 @@ enum Cmd {
     /// Record a display to a local elementary stream.
     Record {
         #[arg(short, long, default_value = "out.hevc")]
-        output: String,
+        output: PathBuf,
         #[command(flatten)]
         enc: EncodeArgs,
     },
-    /// Stream a display to a lanrec-recv on another machine.
+    /// Stream a display to a lanrec receiver on another machine.
     Send {
         /// Receiver address, e.g. 10.0.0.2:9000.
         #[arg(short, long)]
@@ -117,135 +109,113 @@ fn main() -> Result<()> {
             fps,
             monitor,
         } => measure_capture(seconds, fps, monitor),
-        Cmd::Record { output, enc } => record(&output, &enc),
+        Cmd::Record { output, enc } => record(Target::File(output), &enc, None),
         Cmd::Send { to, via, enc } => send(&to, via.as_deref(), &enc),
     }
 }
 
-// ----------------------------------------------------------------- pipeline ---
+// ----------------------------------------------------------------- recording ---
 
-/// What one capture run produced beyond what the encoder itself counts.
-struct RunStats {
-    repeats: u64,
-    paced_out: u64,
-    queue_dropped: u64,
-}
+fn record(target: Target, a: &EncodeArgs, via_label: Option<String>) -> Result<()> {
+    let gpu = Gpu::new()?;
+    let monitor = pick_monitor(&gpu, a.monitor)?;
+    let profile = build_profile(&monitor, a);
+    // Dropping the device here keeps the session's own one the only user of the
+    // GPU; it creates a fresh device on the thread that drives the encode.
+    drop(gpu);
 
-/// Capture, pace and encode until the clock runs out.
-///
-/// Shared by `record` and `send`; only the sink differs.
-fn run(
-    gpu: &Gpu,
-    m: &MonitorInfo,
-    seconds: u64,
-    fps: u32,
-    enc: &mut Encoder,
-    sink: &mut dyn FrameSink,
-) -> Result<RunStats> {
-    let cap = Capture::monitor(gpu, m)?;
-    let mut pacer = Pacer::new(fps, 1);
-    let period = pacer.period_ns();
-
-    // The frame the pacer held back, and the last one actually encoded -- the
-    // latter is what gets repeated into slots where the screen did not change.
-    let mut held: Option<lanrec_core::capture::CapturedFrame> = None;
-    let mut last: Option<(Texture, u64)> = None;
-    let mut repeats = 0u64;
-
-    let started = Instant::now();
-    let mut next_report = started + Duration::from_secs(1);
-
-    while started.elapsed().as_secs() < seconds {
-        if Instant::now() >= next_report {
-            next_report = Instant::now() + Duration::from_secs(1);
-            eprintln!(
-                "  {:>3}s  {} Frames  {:.0} Mbit/s",
-                started.elapsed().as_secs(),
-                enc.frames,
-                enc.bytes as f64 * 8.0 / 1e6 / started.elapsed().as_secs_f64()
-            );
-        }
-
-        // Polled rather than blocking: a motionless screen delivers no frames at
-        // all, and the run still has to end when its time is up.
-        let Some(frame) = cap.recv_timeout(Duration::from_millis(200))? else {
-            fill_gaps(&mut pacer, &mut last, period, enc, sink, &mut repeats)?;
-            continue;
-        };
-
-        match pacer.step(frame.timestamp_ns) {
-            Step::Hold => held = Some(frame),
-            Step::Emit {
-                pts_ns,
-                source,
-                gap_slots,
-            } => {
-                if let Some((tex, last_pts)) = &last {
-                    for k in 1..=gap_slots {
-                        enc.encode(tex, last_pts + period * k, sink)?;
-                        repeats += 1;
-                    }
-                }
-
-                let texture = match source {
-                    Source::Held => {
-                        held.replace(frame)
-                            .context("Pacer wollte den gehaltenen Frame, es gab aber keinen")?
-                            .texture
-                    }
-                    Source::Incoming => {
-                        held = None;
-                        frame.texture
-                    }
-                };
-
-                enc.encode(&texture, pts_ns, sink)?;
-                last = Some((texture, pts_ns));
-            }
+    describe(&monitor, &profile, a);
+    match (&target, &via_label) {
+        (Target::File(p), _) => println!("-> {}\n", p.display()),
+        (Target::Net { addr, .. }, Some(v)) => println!("-> {addr}  ueber {v}\n"),
+        (Target::Net { addr, .. }, None) => {
+            println!("-> {addr}  (Route vom System gewaehlt)\n")
         }
     }
 
-    // The run may well end during a stall, so close the timeline before the
-    // encoder does.
-    fill_gaps(&mut pacer, &mut last, period, enc, sink, &mut repeats)?;
-    enc.finish()?;
+    let cfg = session::Config {
+        monitor,
+        profile,
+        target,
+        duration: (a.seconds > 0).then(|| Duration::from_secs(a.seconds)),
+    };
 
-    Ok(RunStats {
-        repeats,
-        paced_out: pacer.dropped,
-        queue_dropped: cap.dropped(),
+    let mut last_line = Instant::now();
+    let mut done = false;
+
+    session::run(&cfg, &AtomicBool::new(false), &mut |s: &SessionStatus| {
+        if s.finished && !done {
+            done = true;
+            report(s);
+            return;
+        }
+        // One line a second is enough to see whether it is keeping up.
+        if !done && last_line.elapsed() >= Duration::from_secs(1) {
+            last_line = Instant::now();
+            eprintln!(
+                "  {:>3}s  {} Frames  {:.0} Mbit/s",
+                s.seconds as u64,
+                s.frames,
+                s.bitrate_bps / 1e6
+            );
+        }
     })
 }
 
-/// Repeat the last encoded frame into every output slot that has passed with no
-/// new one, and advance `last` to match.
-///
-/// Without this, a screen that stops changing stalls the whole timeline: the
-/// receiver goes silent, and a run that ends during the stall is simply missing
-/// its tail. Repeats of identical content cost almost nothing.
-fn fill_gaps(
-    pacer: &mut Pacer,
-    last: &mut Option<(Texture, u64)>,
-    period: u64,
-    enc: &mut Encoder,
-    sink: &mut dyn FrameSink,
-    repeats: &mut u64,
-) -> Result<()> {
-    // Before the first real frame there is nothing to repeat.
-    let Some((tex, last_pts)) = last.clone() else {
-        return Ok(());
-    };
+fn send(to: &str, via: Option<&str>, a: &EncodeArgs) -> Result<()> {
+    let addr: SocketAddr = to
+        .parse()
+        .with_context(|| format!("{to} ist keine gueltige Adresse (z.B. 10.0.0.2:9000)"))?;
 
-    let fill = pacer.catch_up(clock::now_ns());
-    for k in 1..=fill {
-        enc.encode(&tex, last_pts + period * k, sink)?;
-        *repeats += 1;
-    }
-    if fill > 0 {
-        *last = Some((tex, last_pts + period * fill));
-    }
-    Ok(())
+    // Resolve before anything expensive happens, so a typo fails immediately
+    // rather than after the encoder is up.
+    let nic = match via {
+        Some(spec) => {
+            let labels = Labels::load(&config::labels_path()?);
+            Some(nic::find(spec, &labels)?)
+        }
+        None => None,
+    };
+    let label = nic.as_ref().map(|n| n.display_name.clone());
+
+    record(
+        Target::Net {
+            addr,
+            via: nic.map(Box::new),
+        },
+        a,
+        label,
+    )
 }
+
+fn report(s: &SessionStatus) {
+    println!(
+        "Frames      {}  ({} neu, {} wiederholt)",
+        s.frames,
+        s.frames.saturating_sub(s.repeats),
+        s.repeats
+    );
+    println!("Keyframes   {}", s.keyframes);
+    println!("Groesse     {:.1} MB", s.bytes as f64 / 1e6);
+    println!("Bitrate     {:.0} Mbit/s", s.bitrate_bps / 1e6);
+    println!(
+        "Groesster   {:.0} kB (Keyframe)",
+        s.peak_frame_bytes as f64 / 1e3
+    );
+    println!("Verworfen   {} (Pacing)", s.paced_out);
+    println!("Queue-Drop  {} (Encoder zu langsam)", s.queue_dropped);
+    if let Some(local) = &s.local_addr {
+        println!("Gesendet    ueber {local}");
+    }
+
+    if let Some(e) = &s.error {
+        println!("\nFehler: {e}");
+    } else if s.queue_dropped > 0 {
+        println!("\n! Queue-Drops: der Encoder oder die Leitung kam nicht mit.");
+    }
+}
+
+// ----------------------------------------------------------------- inspection ---
 
 fn pick_monitor(gpu: &Gpu, which: Option<usize>) -> Result<MonitorInfo> {
     let monitors = capture::monitors(gpu)?;
@@ -282,8 +252,13 @@ fn build_profile(m: &MonitorInfo, a: &EncodeArgs) -> Profile {
 }
 
 fn describe(m: &MonitorInfo, p: &Profile, a: &EncodeArgs) {
+    let how_long = if a.seconds > 0 {
+        format!("{}s", a.seconds)
+    } else {
+        "bis Ctrl-C".into()
+    };
     println!(
-        "{} {}x{} -> {} {} {}-bit, QP {}, {} fps, {}s",
+        "{} {}x{} -> {} {} {}-bit, QP {}, {} fps, {how_long}",
         m.device,
         m.width,
         m.height,
@@ -292,206 +267,7 @@ fn describe(m: &MonitorInfo, p: &Profile, a: &EncodeArgs) {
         if a.eight_bit { 8 } else { 10 },
         a.qp,
         a.fps,
-        a.seconds,
     );
-}
-
-fn report(enc: &Encoder, stats: &RunStats, elapsed: f64) {
-    println!(
-        "Frames      {}  ({} neu, {} wiederholt)",
-        enc.frames,
-        enc.frames - stats.repeats,
-        stats.repeats
-    );
-    println!("Keyframes   {}", enc.keyframes);
-    println!("Groesse     {:.1} MB", enc.bytes as f64 / 1e6);
-    println!(
-        "Bitrate     {:.0} Mbit/s",
-        enc.bytes as f64 * 8.0 / 1e6 / elapsed
-    );
-    println!(
-        "Groesster   {:.0} kB (Keyframe)",
-        enc.peak_frame_bytes as f64 / 1e3
-    );
-    println!("Verworfen   {} (Pacing)", stats.paced_out);
-    println!("Queue-Drop  {} (Encoder zu langsam)", stats.queue_dropped);
-
-    if stats.queue_dropped > 0 {
-        println!("\n! Queue-Drops: der Encoder oder die Leitung kam nicht mit.");
-    }
-}
-
-// ----------------------------------------------------------------- commands ---
-
-fn record(output: &str, a: &EncodeArgs) -> Result<()> {
-    let gpu = Gpu::new()?;
-    let m = pick_monitor(&gpu, a.monitor)?;
-    let profile = build_profile(&m, a);
-
-    describe(&m, &profile, a);
-    println!("-> {output}\n");
-
-    let nvenc = Arc::new(Nvenc::load()?);
-    let mut enc = Encoder::new(&nvenc, &gpu, &profile)?;
-    let mut sink = FileSink(BufWriter::new(
-        File::create(output).with_context(|| format!("{output} anlegen"))?,
-    ));
-
-    let started = Instant::now();
-    let stats = run(&gpu, &m, a.seconds, a.fps, &mut enc, &mut sink)?;
-    sink.0.flush().context("Datei abschliessen")?;
-
-    report(&enc, &stats, started.elapsed().as_secs_f64());
-    Ok(())
-}
-
-/// Frames each encoded picture and puts it on the wire.
-struct NetSink<W: Write> {
-    out: W,
-}
-
-impl<W: Write> FrameSink for NetSink<W> {
-    fn frame(&mut self, pts_ns: u64, keyframe: bool, data: &[u8]) -> Result<()> {
-        let flags = if keyframe { FLAG_KEYFRAME } else { 0 };
-        write_frame(&mut self.out, Kind::Video, pts_ns, flags, data)?;
-
-        // Flush per frame. The buffer exists so that a header and its payload
-        // leave as one write, not to batch frames: left to fill, it holds the
-        // whole recording of a quiet screen and the receiver sees nothing until
-        // the very end. One syscall per frame at 60 fps costs nothing.
-        self.out.flush().context("Frame absenden")
-    }
-}
-
-fn send(to: &str, via: Option<&str>, a: &EncodeArgs) -> Result<()> {
-    let gpu = Gpu::new()?;
-    let m = pick_monitor(&gpu, a.monitor)?;
-    let profile = build_profile(&m, a);
-
-    describe(&m, &profile, a);
-
-    // Resolve before anything expensive happens, so a typo fails immediately
-    // rather than after the encoder is up.
-    let nic = match via {
-        Some(spec) => {
-            let labels = Labels::load(&config::labels_path()?);
-            Some(nic::find(spec, &labels)?)
-        }
-        None => None,
-    };
-
-    let stream = connect(to, nic.as_ref())?;
-    let local = stream.local_addr().context("lokale Adresse ermitteln")?;
-    match &nic {
-        Some(n) => println!("-> {to}  ueber {} ({})", n.display_name, local.ip()),
-        None => println!("-> {to}  ueber {} (Route vom System gewaehlt)", local.ip()),
-    }
-    println!();
-    let mut sink = NetSink {
-        out: BufWriter::with_capacity(1 << 20, stream),
-    };
-
-    // The receiver needs the geometry before the first frame, both to report it
-    // and to name the file.
-    write_info(
-        &mut sink.out,
-        &StreamInfo {
-            codec: "hevc".into(),
-            width: profile.width,
-            height: profile.height,
-            fps_num: profile.fps_num,
-            fps_den: profile.fps_den,
-            chroma: if a.chroma420 { "yuv420" } else { "yuv444" }.into(),
-            bit_depth: if a.eight_bit { 8 } else { 10 },
-            source: m.device.clone(),
-            sender: format!("lanrec {}", env!("CARGO_PKG_VERSION")),
-        },
-    )?;
-
-    let nvenc = Arc::new(Nvenc::load()?);
-    let mut enc = Encoder::new(&nvenc, &gpu, &profile)?;
-
-    let started = Instant::now();
-    let stats = run(&gpu, &m, a.seconds, a.fps, &mut enc, &mut sink)?;
-
-    // Tell the receiver this was a clean end, so it does not warn about a
-    // recording that stops mid-air.
-    write_end(&mut sink.out)?;
-    sink.out.flush().context("Verbindung leeren")?;
-
-    report(&enc, &stats, started.elapsed().as_secs_f64());
-    Ok(())
-}
-
-/// Connect with a send buffer big enough for the stream, optionally forced onto
-/// one adapter.
-///
-/// When `via` is given the socket is both pinned to that interface and bound to
-/// its address, and the result is verified afterwards -- see the module comment
-/// on `lanrec_core::net::bind` for why neither alone is enough.
-fn connect(to: &str, via: Option<&NicView>) -> Result<TcpStream> {
-    let addr: SocketAddr = to
-        .parse()
-        .with_context(|| format!("{to} ist keine gueltige Adresse (z.B. 10.0.0.2:9000)"))?;
-
-    let socket =
-        Socket::new(Domain::for_address(addr), Type::STREAM, None).context("Socket anlegen")?;
-    if let Err(e) = socket.set_send_buffer_size(SOCKET_BUFFER) {
-        eprintln!("Hinweis: Sendepuffer konnte nicht gesetzt werden: {e}");
-    }
-
-    let wanted = match via {
-        Some(n) => {
-            if !n.up {
-                bail!("{} hat keinen Link -- Kabel steckt nicht", n.display_name);
-            }
-            let ip: IpAddr = n
-                .ipv4
-                .first()
-                .with_context(|| {
-                    format!(
-                        "{} hat keine IPv4-Adresse -- ohne die kann nichts darueber gesendet werden",
-                        n.display_name
-                    )
-                })?
-                .parse()
-                .context("IPv4 des Adapters parsen")?;
-
-            bind::pin_to_interface(socket.as_raw_socket(), n.index)?;
-            socket
-                .bind(&SocketAddr::new(ip, 0).into())
-                .with_context(|| format!("an {ip} binden"))?;
-            Some(ip)
-        }
-        None => None,
-    };
-
-    socket.connect(&addr.into()).with_context(|| match via {
-        Some(n) => format!(
-            "keine Verbindung zu {addr} ueber {} -- ist der Empfaenger an diesem Kabel?",
-            n.display_name
-        ),
-        None => format!("keine Verbindung zu {addr} -- laeuft lanrec-recv dort?"),
-    })?;
-
-    let stream: TcpStream = socket.into();
-    // Each frame is written as one burst; waiting to coalesce only adds latency.
-    stream.set_nodelay(true).ok();
-
-    // Trust nothing: read back which address the connection actually got.
-    if let Some(want) = wanted {
-        let got = stream
-            .local_addr()
-            .context("lokale Adresse ermitteln")?
-            .ip();
-        if got != want {
-            bail!(
-                "Verbindung laeuft ueber {got} statt ueber {want} -- der gewaehlte Adapter wurde nicht benutzt"
-            );
-        }
-    }
-
-    Ok(stream)
 }
 
 fn list_monitors() -> Result<()> {
@@ -503,7 +279,7 @@ fn list_monitors() -> Result<()> {
     Ok(())
 }
 
-/// Capture for a while and report what actually arrived.
+/// Capture for a while and report what actually arrived, without encoding.
 fn measure_capture(seconds: u64, fps: u32, monitor: Option<usize>) -> Result<()> {
     let gpu = Gpu::new()?;
     let m = pick_monitor(&gpu, monitor)?;

@@ -13,3 +13,4 @@ pub mod nvenc;
 pub mod pace;
 pub mod preview;
 pub mod profile;
+pub mod session;

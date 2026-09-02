@@ -1,4 +1,5 @@
 mod preview;
+mod send;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -11,7 +12,8 @@ use lanrec_core::d3d::Gpu;
 use lanrec_core::net::nic::{self, NicView};
 use lanrec_core::nvenc::{self, GpuCaps};
 use lanrec_core::profile::{self, Issue, Profile};
-use serde::Serialize;
+use lanrec_core::session::SessionStatus;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use preview::Preview;
@@ -24,6 +26,8 @@ struct AppState {
     labels_path: PathBuf,
     /// `None` while the preview is off. Dropping it stops the thread.
     preview: Mutex<Option<Preview>>,
+    /// `None` while nothing is being recorded.
+    send: Mutex<Option<send::Session>>,
 }
 
 impl AppState {
@@ -37,6 +41,7 @@ impl AppState {
             labels: Mutex::new(labels),
             labels_path,
             preview: Mutex::new(None),
+            send: Mutex::new(None),
         }
     }
 }
@@ -186,6 +191,82 @@ fn preview_frame(state: State<AppState>) -> Result<Option<PreviewFrame>, String>
     }))
 }
 
+// ------------------------------------------------------------------ sending ---
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendRequest {
+    /// Receiver address, e.g. 10.0.0.2:9000. Ignored when `file` is set.
+    to: String,
+    /// MAC of the adapter to force the stream onto. Empty leaves the choice to
+    /// the routing table.
+    via_mac: Option<String>,
+    monitor: Option<usize>,
+    profile: Profile,
+    /// Record locally instead of sending.
+    file: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SendView {
+    running: bool,
+    status: Option<SessionStatus>,
+}
+
+#[tauri::command]
+fn send_start(req: SendRequest, state: State<AppState>) -> Result<(), String> {
+    let session = send::start(
+        &req.to,
+        req.via_mac.as_deref(),
+        req.monitor,
+        &req.profile,
+        req.file.filter(|f| !f.trim().is_empty()).map(Into::into),
+    )
+    .map_err(|e| format!("{e:#}"))?;
+
+    let mut slot = state.send.lock().map_err(|e| e.to_string())?;
+    // Dropping the old one stops its thread before a new encoder opens.
+    *slot = None;
+    *slot = Some(session);
+    Ok(())
+}
+
+/// Ask the pipeline to wind down. It finishes the current frame, closes the
+/// timeline and tells the receiver this was a clean end, so this returns before
+/// the file is complete -- the UI watches `finished` for that.
+#[tauri::command]
+fn send_stop(state: State<AppState>) -> Result<(), String> {
+    let slot = state.send.lock().map_err(|e| e.to_string())?;
+    if let Some(s) = slot.as_ref() {
+        s.request_stop();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn send_view(state: State<AppState>) -> Result<SendView, String> {
+    let slot = state.send.lock().map_err(|e| e.to_string())?;
+    Ok(match slot.as_ref() {
+        Some(s) => SendView {
+            running: !s.is_done(),
+            status: Some(s.status()),
+        },
+        None => SendView {
+            running: false,
+            status: None,
+        },
+    })
+}
+
+/// Forget a finished recording so the panel goes back to its idle state.
+#[tauri::command]
+fn send_clear(state: State<AppState>) -> Result<(), String> {
+    let mut slot = state.send.lock().map_err(|e| e.to_string())?;
+    *slot = None;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -200,7 +281,11 @@ pub fn run() {
             list_monitors,
             preview_start,
             preview_stop,
-            preview_frame
+            preview_frame,
+            send_start,
+            send_stop,
+            send_view,
+            send_clear
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

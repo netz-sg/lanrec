@@ -90,18 +90,19 @@ lanrec monitors    # capturable displays
 lanrec capture     # measure capture and pacing without encoding anything
 ```
 
-There are two desktop apps. The **sender** (`app/`) has a live preview, the
-adapter list with link status, and quality settings with a bitrate estimate. The
-**receiver** (`app-recv/`) shows what is arriving and where it lands, and ships
-as a DMG for Apple Silicon and Intel.
+There are two desktop apps. The **sender** (`app/`) records and streams with one
+button, and has a live preview, the adapter list with link status, and quality
+settings with a bitrate estimate. The **receiver** (`app-recv/`) shows what is
+arriving and where it lands, and ships as a DMG for Apple Silicon and Intel.
 
 ```sh
 cd app && npm install && npm run tauri dev            # sender, Windows
 cd app-recv && npm install && npm run tauri dev       # receiver, anywhere
 ```
 
-The receiver app wraps the same `lanrec-recv` library the CLI uses, so the two
-cannot drift apart.
+Both apps wrap the same libraries the CLI uses -- `lanrec_core::session` for
+sending, `lanrec_recv` for receiving -- so an app and its command line
+counterpart cannot behave differently.
 
 ## The bandwidth reality
 
@@ -261,7 +262,7 @@ contend with a running recording for the same context.
 
 ```
 crates/lanrec-wire/    Wire format. No platform dependencies.
-crates/lanrec-core/    Capture, encode, pacing, preview, adapters. Windows.
+crates/lanrec-core/    Capture, encode, pacing, session, preview, adapters. Windows.
 crates/lanrec-cli/     Sender, headless.
 crates/lanrec-recv/    Receiver, library plus CLI. Builds anywhere.
 app/                   Sender app (Tauri 2 + React). Windows.
@@ -334,7 +335,10 @@ waits forever for output that will never be produced.
    QPC. Without drift correction the audio is 200–400 ms out after ~40 minutes.
 3. **The WGC session breaks** on alt-tab, resolution changes and fullscreen
    toggles. It needs to be rebuilt without interrupting the recording.
-4. **The bitrate estimate is a model, not a measurement.** Log-linear, with fixed
+4. **The app cannot scale.** The encode runs at the display's own resolution;
+   the resolution buttons in the settings describe the source, not a scaler. A
+   recording started from the app uses the monitor's geometry regardless.
+5. **The bitrate estimate is a model, not a measurement.** Log-linear, with fixed
    factors for chroma, depth and codec. It reliably tells 150 Mbit/s from 400,
    and not 230 from 250. Calibrating it needs numbers from real gameplay.
 
