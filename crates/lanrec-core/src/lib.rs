@@ -5,6 +5,7 @@
 //! without a window on screen.
 
 pub mod capture;
+pub mod clock;
 pub mod config;
 pub mod d3d;
 pub mod net;

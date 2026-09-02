@@ -91,6 +91,30 @@ impl Pacer {
         self.period_ns
     }
 
+    /// Slots that have gone by with no frame at all, as of `now_ns`.
+    ///
+    /// [`Pacer::step`] only learns about a gap when the *next* frame arrives, so
+    /// a screen that stops changing entirely stalls the timeline: nothing is
+    /// emitted, and if the run ends there the tail is simply missing. Worse for a
+    /// live stream, where the receiver goes silent for as long as the screen
+    /// stands still.
+    ///
+    /// Call this whenever waiting for a frame times out, and once more at the end
+    /// of a run. The grid is advanced, so the next real frame will not report the
+    /// same slots again.
+    ///
+    /// Returns 0 before the first frame -- there is nothing to repeat yet.
+    pub fn catch_up(&mut self, now_ns: u64) -> u64 {
+        if !self.anchored || now_ns < self.next_tick_ns {
+            return 0;
+        }
+        let slots = (now_ns - self.next_tick_ns) / self.period_ns + 1;
+        self.gaps += slots;
+        self.index += slots;
+        self.next_tick_ns += slots * self.period_ns;
+        slots
+    }
+
     /// Feed one captured frame, identified by its QPC capture timestamp.
     pub fn step(&mut self, t_ns: u64) -> Step {
         if !self.anchored {
@@ -250,6 +274,47 @@ mod tests {
 
         // 480 frames at 48 Hz is 10 s, so ~600 slots once the gaps are filled.
         assert!((595..=601).contains(&pts.len()), "got {} frames", pts.len());
+    }
+
+    #[test]
+    fn catch_up_keeps_the_timeline_moving_with_no_frames_at_all() {
+        // The case that produced a 2-frame file for a 4-second recording: the
+        // screen never changed, so step() was never called again and the tail
+        // was never filled.
+        let mut p = Pacer::new(60, 1);
+        p.step(0);
+
+        let filled = p.catch_up(1_000_000_000);
+        assert!(
+            (59..=61).contains(&filled),
+            "one second at 60 fps should be ~60 slots, got {filled}"
+        );
+
+        // Advancing must be idempotent: asking again at the same instant adds
+        // nothing, or a stalled run would emit the same slots repeatedly.
+        assert_eq!(p.catch_up(1_000_000_000), 0);
+    }
+
+    #[test]
+    fn catch_up_does_nothing_before_the_first_frame() {
+        let mut p = Pacer::new(60, 1);
+        assert_eq!(p.catch_up(5_000_000_000), 0);
+    }
+
+    #[test]
+    fn a_frame_after_catch_up_does_not_re_report_the_gap() {
+        let mut p = Pacer::new(60, 1);
+        p.step(0);
+        let filled = p.catch_up(1_000_000_000);
+
+        match p.step(1_000_000_000 + 16_666_666) {
+            Step::Emit { gap_slots, .. } => assert_eq!(
+                gap_slots, 0,
+                "slots already filled by catch_up must not be counted twice"
+            ),
+            Step::Hold => panic!("a frame past the tick must emit"),
+        }
+        assert!(filled > 0);
     }
 
     #[test]

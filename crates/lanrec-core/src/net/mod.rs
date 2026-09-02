@@ -1,3 +1,4 @@
+pub mod bind;
 pub mod nic;
 
 /// Fraction of a link's nominal rate that a real stream can occupy.

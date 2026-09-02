@@ -347,3 +347,56 @@ pub fn enumerate_view(labels: &Labels) -> Result<Vec<NicView>> {
     });
     Ok(v)
 }
+
+/// Find exactly one adapter matching `spec`.
+///
+/// `spec` may be the name the user gave it, the Windows name, an IPv4 address or
+/// a MAC. Matching is case-insensitive.
+///
+/// An ambiguous spec is an error rather than a guess: picking one of two
+/// candidates silently is exactly how a recording ends up on the wrong cable.
+pub fn find(spec: &str, labels: &Labels) -> Result<NicView> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        bail!("kein Adapter angegeben");
+    }
+
+    let all = enumerate_view(labels)?;
+    let hits: Vec<&NicView> = all
+        .iter()
+        .filter(|n| {
+            n.label
+                .as_deref()
+                .is_some_and(|l| l.eq_ignore_ascii_case(spec))
+                || n.name.eq_ignore_ascii_case(spec)
+                || n.mac
+                    .as_deref()
+                    .is_some_and(|m| m.eq_ignore_ascii_case(spec))
+                || n.ipv4.iter().any(|ip| ip == spec)
+        })
+        .collect();
+
+    match hits.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => {
+            let known: Vec<String> = all
+                .iter()
+                .map(|n| {
+                    let ip = n.ipv4.first().map(String::as_str).unwrap_or("keine IPv4");
+                    format!("{} ({ip})", n.display_name)
+                })
+                .collect();
+            bail!(
+                "kein Adapter passt auf \"{spec}\" -- vorhanden: {}",
+                known.join(", ")
+            )
+        }
+        many => {
+            let names: Vec<&str> = many.iter().map(|n| n.display_name.as_str()).collect();
+            bail!(
+                "\"{spec}\" passt auf mehrere Adapter ({}) -- IP oder MAC angeben",
+                names.join(", ")
+            )
+        }
+    }
+}

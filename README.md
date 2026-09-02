@@ -68,8 +68,12 @@ cargo run --release -p lanrec-recv -- --listen 10.0.0.2:9000 --out-dir ~/recordi
 On the gaming PC:
 
 ```sh
-cargo run --release -p lanrec-cli -- send --to 10.0.0.2:9000 --seconds 600
+cargo run --release -p lanrec-cli -- send --to 10.0.0.2:9000 --via "Zum Mac" --seconds 600
 ```
+
+`--via` names the adapter to send over -- by the name you gave it, its IPv4 or
+its MAC. Without it the routing table decides, which with two adapters can
+silently mean the wrong one. See [Forcing one adapter](#forcing-one-adapter).
 
 Record locally, no network involved:
 
@@ -185,6 +189,13 @@ The pacer reports empty slots as `gap_slots` and leaves the policy to the
 caller: a recording repeats the previous frame (identical content costs almost
 no bitrate), a live view might rather skip.
 
+Reporting on the *next* frame is not enough on its own, though. If the screen
+stops changing completely, no next frame ever arrives -- a four-second recording
+of a frozen desktop produced two frames, because the trailing gap was never
+closed and the receiver had nothing to write. So the timeline is also advanced
+from the clock (`Pacer::catch_up`) whenever waiting for a frame times out, and
+once more at the end of a run.
+
 ### 165 → 60 will always judder a little
 
 165 / 60 = 2.75. Not an integer ratio, so runs of 2 and 3 frames have to be
@@ -200,6 +211,35 @@ uniform, at the cost of exactly one input frame of latency.
 
 **The clean fix is on your side:** cap the game at 120 fps and record at 60. A
 2:1 ratio has no ambiguity at all.
+
+### Forcing one adapter
+
+With two NICs, `connect()` alone does not choose: the routing table does. Where a
+direct cable and a router link both exist, a stream meant for the cable can end
+up going through the house network, competing with everything else and never
+reaching the rate the cable could carry. Nothing in the socket API defaults to
+"the one I meant".
+
+`--via` therefore does three things, because no single one of them is airtight:
+
+1. **`IP_UNICAST_IF`** pins the outgoing interface explicitly, outranking the
+   routing table. (socket2 exposes this on Unix only, so it is set directly.)
+2. **Binding the socket to that adapter's address** before connecting. Windows
+   uses the strong host model for sending, so a socket with that source address
+   leaves through that adapter.
+3. **Reading `local_addr()` back after connecting** and failing loudly if it is
+   not the address that was asked for.
+
+The third step is the one that matters. A socket option that silently did nothing
+would otherwise look exactly like success.
+
+Resolution is strict on purpose: a spec matching two adapters is an error rather
+than a guess, and an adapter with no link or no IPv4 is refused before the
+encoder is even started.
+
+The receiver side is already explicit -- `--listen 10.0.0.2:9000` binds to one
+address. Use the direct link's address rather than `0.0.0.0` if you want it to
+accept from that cable only.
 
 ### The preview does not read back frames
 

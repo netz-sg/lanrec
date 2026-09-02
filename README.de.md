@@ -29,7 +29,18 @@ Auf dem Empfänger (Mac, Linux, PC):
 
 Auf dem Gaming-PC:
 
-    cargo run --release -p lanrec-cli -- send --to 10.0.0.2:9000 --seconds 600
+    cargo run --release -p lanrec-cli -- send --to 10.0.0.2:9000 --via "Zum Mac" --seconds 600
+
+`--via` bestimmt, ueber welchen Adapter gesendet wird -- per Name, IPv4 oder MAC.
+Ohne die Angabe entscheidet die Routing-Tabelle, und die kann bei zwei Adaptern
+still die falsche Karte waehlen.
+
+Erzwungen wird das dreifach, weil keine Einzelmassnahme dicht ist: `IP_UNICAST_IF`
+pinnt die Schnittstelle und schlaegt die Routing-Tabelle, das Binden an die
+Adapter-Adresse nutzt das Strong-Host-Modell von Windows, und nach dem Verbinden
+wird `local_addr()` zurueckgelesen und bei Abweichung abgebrochen. Der dritte
+Schritt ist der entscheidende: eine Socket-Option, die stillschweigend nichts
+tut, saehe sonst genauso aus wie Erfolg.
 
 Lokal aufnehmen, ohne Netz:
 
